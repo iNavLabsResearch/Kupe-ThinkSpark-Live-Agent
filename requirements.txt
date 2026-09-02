@@ -16,4 +16,4 @@ uvicorn[standard]>=0.29
 python-dotenv>=1.0
 pyngrok>=7.2
 gradio>=4.44,<6
-fastrtc[vad]>=0.0.19
+fastrtc>=0.0.19

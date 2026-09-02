@@ -57,6 +57,7 @@ class Policy:
         self._speculation: asyncio.Task | None = None
         self._speculated_text: str = ""
         self._last_silence_break = 0.0
+        self._last_backchannel = 0.0
 
     # ------------------------------------------------------------------ #
     async def handle(self, flag: str) -> Action | None:
@@ -201,13 +202,30 @@ class Policy:
         return None
 
     # --- dead air ------------------------------------------------------- #
+    async def on_spoken(self, text: str) -> Action | None:
+        """Spoken-head back-channel from ThinkSpark (plain text -> TTS)."""
+        text = (text or "").strip()
+        if not text or self.state is not AgentState.IDLE:
+            return None
+        if getattr(self.agent, "_speaking", False):
+            return None
+        now = time.time()
+        if now - self._last_backchannel < 2.0:
+            return None
+        self._last_backchannel = now
+        await self.agent.speak(text, filler=True)
+        return Action("SPOKEN", text)
+
     async def _on_silence_break(self) -> Action | None:
         # rate-limited: the model fires this readily, and an agent that fills every
         # gap is as bad as one that fills none
         now = time.time()
         if self.state is not AgentState.IDLE or now - self._last_silence_break < 6.0:
             return None
+        if now - self._last_backchannel < 2.0:
+            return None
         self._last_silence_break = now
+        self._last_backchannel = now
         await self.agent.speak("Mm-hmm.", filler=True)
         return Action("SILENCE_BREAK", "played filler")
 

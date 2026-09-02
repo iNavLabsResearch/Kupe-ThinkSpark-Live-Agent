@@ -100,6 +100,10 @@ class SonioxSTT:
         self.partial = ""
         self.final = ""
 
+    def reset_turn(self) -> None:
+        self.partial = ""
+        self.final = ""
+
     async def close(self) -> None:
         if self._ws:
             await self._ws.close()
