@@ -4,12 +4,37 @@ A terminal voice agent where **ThinkSpark controls the pipeline**. Soniox STT, K
 LLM, Sarvam TTS — all streaming — with every start/stop decision made by
 Kupe-ThinkSpark-Realtime-270M running locally on your machine.
 
+**Terminal:**
 ```bash
 pip install -r requirements.txt
 python main.py
 ```
 
-Keys are already in `agent/keys.py` (gitignored). No other setup.
+**Browser (any device on your LAN):**
+```bash
+python server.py            # prints the ws:// URL to paste
+cd web && npm install && npm run dev
+```
+
+The server binds `0.0.0.0` and prints your LAN URL:
+
+```
+==============================================================
+  Kupe ThinkSpark Live Agent — ready
+==============================================================
+  Paste this into the UI:
+
+      ws://192.168.1.42:8000/ws
+
+  local:   ws://127.0.0.1:8000/ws
+  health:  http://192.168.1.42:8000/health
+==============================================================
+```
+
+Open the web UI, paste that URL, hit Connect. Mic streams up, TTS streams back,
+every flag and action renders live. No auth — local demo server.
+
+Keys live in `.env` (gitignored) or `agent/keys.py`. Copy `.env.example` to start.
 
 ## The stack
 
@@ -18,7 +43,7 @@ Keys are already in `agent/keys.py` (gitignored). No other setup.
 | floor control | **ThinkSpark** (local) | Kupe-ThinkSpark-Realtime-270M | 80 ms frames |
 | STT | Soniox | `stt-rt-v5` | websocket |
 | LLM | Krutrim | `gemma-4-31b-it` | SSE deltas |
-| TTS | Sarvam | `bulbul:v3` / voice `ritu` | chunked playback |
+| TTS | Soniox | `tts-rt-v2` / voice **Mina** | websocket, chunk-by-chunk |
 
 Audio in is denoised once with **RNNoise** before anything sees it.
 
@@ -88,6 +113,21 @@ opposite ends.
 Disable with `--no-denoise` to A/B it. If `pyrnnoise` is not installed the agent still
 runs, just noisier — it degrades to a passthrough and says so at boot.
 
+## Turn commit: two triggers, not one
+
+ThinkSpark decides *when* to speak — but it is not the only endpoint signal, and relying
+on it alone will hang the conversation. Soniox emits `<end>` when it detects
+end-of-utterance, and that is hard ground truth.
+
+So a turn commits on **either**:
+
+1. a smoothed `TURN_END` from ThinkSpark (fast path — fires before STT finalizes), or
+2. Soniox `<end>` while the agent is idle (fallback — guarantees the turn completes)
+
+Whichever lands first wins; the other is a no-op because committing resets the turn
+state. This is the difference between an agent that sometimes never replies and one
+that always does.
+
 ## Terminal output
 
 ```
@@ -110,9 +150,14 @@ Ctrl+C prints decode p50/p95 and a flag histogram.
 
 ## Latency
 
-ThinkSpark decodes in ~3 ms on a datacenter GPU and ~30-50 ms on Apple Silicon. Either
-way it fits inside the 80 ms frame budget — the remainder is your headroom, printed in
-the summary. The model is never the bottleneck; STT and LLM round trips are.
+ThinkSpark decodes in ~3 ms on a datacenter GPU and ~25-50 ms on Apple Silicon, against
+an 80 ms frame budget. The SDK tunes the backend per device: TF32 + cuDNN autotune +
+bf16 weights on CUDA (3060/4060/3090/4090/5090, L4, H100, RTX 6000), capped thread count
+on CPU, fp32 on MPS. A warmup pass runs at load so the first real frame is not the slow
+one.
+
+If p95 creeps over 80 ms on your machine, frames queue and the agent drifts behind live
+audio. Watch the summary line; if it does, run on CUDA or raise `--window`.
 
 ## Layout
 
@@ -125,6 +170,10 @@ agent/smoothing.py    sliding-window vote + event latching
 agent/policy.py       flag -> action mapping (the interesting file)
 agent/providers.py    Soniox STT / Krutrim LLM / Sarvam TTS clients
 agent/live.py         mic fan-out, concurrent loops, playback
+agent/session.py      one browser connection (websocket in, TTS out)
+server.py             FastAPI websocket server + LAN URL banner
+web/                  React UI — paste the URL, talk
+.env.example          key template
 ```
 
 ## Status

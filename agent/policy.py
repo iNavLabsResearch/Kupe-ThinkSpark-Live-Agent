@@ -129,8 +129,59 @@ class Policy:
             self._speculation.cancel()
 
         self.agent.stt.reset_turn()
-        self.state = AgentState.LLM_GEN
+        await self._run_turn(text)
         return Action("TURN_END", f"commit -> LLM: {text!r}")
+
+    async def _run_turn(self, text: str) -> None:
+        """Actually run the turn: LLM -> TTS. Speaks sentence-by-sentence so the
+        first audio starts before the LLM has finished writing."""
+        self.state = AgentState.LLM_GEN
+        buf, spoken_any = "", False
+        try:
+            async for delta in self.agent.llm.stream(text):
+                buf += delta
+                # flush on sentence boundaries -> first audio lands sooner
+                while True:
+                    cut = _sentence_cut(buf)
+                    if cut is None:
+                        break
+                    span, buf = buf[:cut].strip(), buf[cut:]
+                    if span:
+                        spoken_any = True
+                        await self.agent.speak(span)
+                        if self.state is AgentState.IDLE:   # barged mid-reply
+                            return
+            if buf.strip():
+                spoken_any = True
+                await self.agent.speak(buf.strip())
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            self.agent.ui.log("error", f"turn failed: {e}", style="bold red")
+        finally:
+            if not spoken_any:
+                self.state = AgentState.IDLE
+
+    async def commit_from_stt(self) -> Action | None:
+        """Soniox signalled end-of-utterance. ThinkSpark decides *when* to speak, but
+        the STT endpoint is a hard ground truth: if the model has not produced a
+        TURN_END by the time the transcript is final, commit anyway rather than
+        leaving the user hanging."""
+        if self.state is not AgentState.IDLE:
+            return None
+        text = (self.agent.stt.final or self.agent.stt.partial).strip()
+        if not text:
+            return None
+
+        if self._speculated_text:
+            reply, self._speculated_text = self._speculated_text, ""
+            self.agent.stt.reset_turn()
+            await self.agent.speak(reply)
+            return Action("STT_END", "used speculative reply (0 ms LLM wait)")
+
+        self.agent.stt.reset_turn()
+        await self._run_turn(text)
+        return Action("STT_END", f"commit -> LLM: {text!r}")
 
     # --- the user interrupted ------------------------------------------ #
     async def _on_barge_soft(self) -> Action | None:
@@ -159,3 +210,15 @@ class Policy:
         self._last_silence_break = now
         await self.agent.speak("Mm-hmm.", filler=True)
         return Action("SILENCE_BREAK", "played filler")
+
+
+_ENDERS = ".?!\u0964"
+
+
+def _sentence_cut(buf: str) -> int | None:
+    """Index just past the first sentence end, if the span is long enough to be worth
+    synthesizing on its own (short fragments make speech choppy)."""
+    for i, ch in enumerate(buf):
+        if ch in _ENDERS and i >= 12:
+            return i + 1
+    return None

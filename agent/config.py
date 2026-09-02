@@ -9,19 +9,29 @@ LLM_MODEL = "gemma-4-31b-it"
 LLM_BASE_URL = "https://cloud.olakrutrim.com/v1"
 STT_MODEL = "stt-rt-v5"
 STT_WS_URL = "wss://stt-rt.soniox.com/transcribe-websocket"
-TTS_MODEL = "bulbul:v3"
-TTS_VOICE = "ritu"
-TTS_URL = "https://api.sarvam.ai/text-to-speech"
+
+# TTS — Soniox realtime, Mina voice
+TTS_MODEL = "tts-rt-v2"
+TTS_VOICE = "Mina"
+TTS_WS_URL = "wss://tts-rt.soniox.com/tts-websocket"
+TTS_SAMPLE_RATE = 24_000
 
 
 @dataclass
 class Keys:
     llm: str
     stt: str
-    tts: str
+    tts: str          # Soniox key drives both STT and TTS
+    hf: str = ""
 
 
 def load_keys() -> Keys:
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+    except ImportError:
+        pass
+
     try:
         from agent import keys as _k
     except ImportError:
@@ -31,8 +41,10 @@ def load_keys() -> Keys:
             "or export those three as env vars."
         )
 
+    soniox = os.environ.get("SONIOX_API_KEY") or _k.SONIOX_API_KEY
     return Keys(
         llm=os.environ.get("KRUTRIM_API_KEY") or _k.KRUTRIM_API_KEY,
-        stt=os.environ.get("SONIOX_API_KEY") or _k.SONIOX_API_KEY,
-        tts=os.environ.get("SARVAM_API_KEY") or _k.SARVAM_API_KEY,
+        stt=soniox,
+        tts=soniox,
+        hf=os.environ.get("HF_TOKEN") or getattr(_k, "HF_TOKEN", ""),
     )

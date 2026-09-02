@@ -12,18 +12,16 @@ Everything is realtime and concurrent:
 from __future__ import annotations
 
 import asyncio
-import io
 import queue
 import threading
 import time
-import wave
 
 import numpy as np
 
 from agent import config
 from agent.denoise import Denoiser
 from agent.policy import AgentState, Policy
-from agent.providers import KrutrimLLM, SarvamTTS, SonioxSTT
+from agent.providers import KrutrimLLM, SonioxSTT, SonioxTTS
 from agent.smoothing import FlagSmoother
 
 MIC_RATE = 24_000        # ThinkSpark's native rate
@@ -56,7 +54,7 @@ class LiveAgent:
 
         self.stt = SonioxSTT(keys.stt, sample_rate=STT_RATE)
         self.llm = KrutrimLLM(keys.llm)
-        self.tts = SarvamTTS(keys.tts)
+        self.tts = SonioxTTS(keys.tts)
         self.denoiser = Denoiser(sample_rate=MIC_RATE, enabled=denoise)
         ui.log("boot", "RNNoise active" if self.denoiser.available
                else "RNNoise unavailable — passthrough (pip install pyrnnoise)",
@@ -66,7 +64,7 @@ class LiveAgent:
 
         self._mic_q: queue.Queue = queue.Queue()
         self._stt_q: asyncio.Queue = asyncio.Queue()
-        self._play_stream = None
+        self._out = None
         self._speaking = False
         self._volume = 1.0
         self._stop_playback = threading.Event()
@@ -81,6 +79,7 @@ class LiveAgent:
 
     def stop_speaking(self) -> None:
         self._stop_playback.set()
+        self._close_out()
         self._speaking = False
         self._volume = 1.0
 
@@ -94,30 +93,45 @@ class LiveAgent:
         self.referee.set_context(agent_text=text)
         self.ui.log("tts", f"speaking: {text!r}", style="cyan")
 
-        wav = await self.tts.synth(text)
-        if wav:
-            await asyncio.get_running_loop().run_in_executor(None, self._play, wav)
+        loop = asyncio.get_running_loop()
+        try:
+            async for pcm in self.tts.stream(text):
+                if self._stop_playback.is_set():
+                    break
+                await loop.run_in_executor(None, self._play_pcm, pcm)
+        except Exception as e:
+            self.ui.log("error", f"tts failed: {e}", style="bold red")
 
+        self._close_out()
         self._speaking = False
         self.policy.state = AgentState.TTS_DONE if not filler else AgentState.IDLE
         self.referee.set_context(agent_text="")
 
-    def _play(self, wav_bytes: bytes) -> None:
+    def _play_pcm(self, pcm_bytes: bytes) -> None:
+        """Write one TTS chunk to a persistent output stream, in 20 ms blocks so a
+        barge-in cuts within 20 ms instead of waiting for the chunk to drain."""
         import sounddevice as sd
 
-        with wave.open(io.BytesIO(wav_bytes), "rb") as w:
-            rate = w.getframerate()
-            pcm = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16)
-        audio = pcm.astype(np.float32) / 32768.0
+        if self._out is None:
+            self._out = sd.OutputStream(samplerate=config.TTS_SAMPLE_RATE,
+                                        channels=1, dtype="float32")
+            self._out.start()
 
-        # play in 40 ms blocks so a barge-in cuts within one block
-        block = rate * 40 // 1000
-        with sd.OutputStream(samplerate=rate, channels=1, dtype="float32") as out:
-            for i in range(0, len(audio), block):
-                if self._stop_playback.is_set():
-                    self.ui.log("tts", "playback cut", style="bold red")
-                    return
-                out.write(audio[i:i + block] * self._volume)
+        audio = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+        block = config.TTS_SAMPLE_RATE * 20 // 1000
+        for i in range(0, len(audio), block):
+            if self._stop_playback.is_set():
+                self.ui.log("tts", "playback cut", style="bold red")
+                return
+            self._out.write(audio[i:i + block] * self._volume)
+
+    def _close_out(self) -> None:
+        if self._out is not None:
+            try:
+                self._out.stop(); self._out.close()
+            except Exception:
+                pass
+            self._out = None
 
     # ------------------------------------------------------------------ #
     # audio in
@@ -200,3 +214,11 @@ class LiveAgent:
             kind = "stt-final" if is_final else "stt"
             self.ui.log(kind, text, style="white" if is_final else "grey58")
             self.referee.set_context(agent_text="", stt_partial=self.stt.partial)
+
+            # Soniox marks end-of-utterance with <end>. ThinkSpark decides *when* to
+            # speak, but if it has not fired TURN_END by the time the transcript is
+            # final we commit anyway — otherwise the user is left hanging.
+            if is_final and "<end>" in text:
+                action = await self.policy.commit_from_stt()
+                if action:
+                    self.ui.log(action.kind, action.detail, style="bold yellow")
