@@ -104,21 +104,65 @@ def _in_colab_or_kaggle() -> bool:
     return "google.colab" in sys.modules
 
 
+def _hf_token() -> str:
+    if _keys and _keys.hf:
+        return _keys.hf
+    try:
+        from agent import keys as _k
+        return getattr(_k, "HF_TOKEN", "") or ""
+    except ImportError:
+        return os.environ.get("HF_TOKEN", "") or ""
+
+
 def _rtc_config():
-    try:
-        from fastrtc import get_cloudflare_turn_credentials
-        return get_cloudflare_turn_credentials()
-    except Exception as e:
-        print(f"==> cloudflare TURN failed ({e})")
-    try:
-        from fastrtc import get_hf_turn_credentials
-        token = os.environ.get("HF_TOKEN") or ""
-        if token:
-            os.environ.setdefault("HF_TOKEN", token)
-        return get_hf_turn_credentials()
-    except Exception as e:
-        print(f"==> HF TURN skipped ({e}) — WebRTC may fail behind NAT")
-        return None
+    """ICE servers for Colab/Kaggle NAT. Empty dict = Connection failed."""
+    import time
+
+    import httpx
+
+    token = _hf_token().strip()
+    if token:
+        os.environ["HF_TOKEN"] = token
+
+    errors = []
+    if token:
+        try:
+            from fastrtc import get_cloudflare_turn_credentials
+            creds = get_cloudflare_turn_credentials(hf_token=token, ttl=600)
+            n = len(creds.get("iceServers") or creds.get("ice_servers") or [])
+            if n:
+                print(f"==> TURN ready  ({n} iceServers)")
+                return creds
+            errors.append("cloudflare helper returned no iceServers")
+        except Exception as e:
+            errors.append(f"fastrtc helper: {e}")
+
+        for i in range(3):
+            try:
+                r = httpx.get(
+                    "https://turn.fastrtc.org/credentials",
+                    headers={"Authorization": f"Bearer {token}"},
+                    params={"ttl": "600"},
+                    timeout=25.0,
+                )
+                r.raise_for_status()
+                creds = r.json()
+                n = len(creds.get("iceServers") or creds.get("ice_servers") or [])
+                if n:
+                    print(f"==> TURN ready via httpx  ({n} iceServers)")
+                    return creds
+            except Exception as e:
+                errors.append(f"httpx {i+1}: {e}")
+                time.sleep(1.2)
+
+    print("==> TURN failed: " + " | ".join(errors[:4]))
+    # STUN-only almost never works Colab -> home browser; still better than {}
+    return {
+        "iceServers": [
+            {"urls": ["stun:stun.cloudflare.com:3478"]},
+            {"urls": ["stun:stun.l.google.com:19302"]},
+        ]
+    }
 
 
 def main() -> None:
@@ -143,23 +187,32 @@ def main() -> None:
         yield (TTS_RATE, audio_out)
         yield AdditionalOutputs(user, reply, flag)
 
-    rtc = _rtc_config()
+    def ice():
+        return _rtc_config()
+
     with gr.Blocks(title="Kupe ThinkSpark") as demo:
         gr.Markdown(
             "# Kupe ThinkSpark\n"
-            "Click the **orb**, grant the mic, **talk**. "
-            "Audio is bidirectional WebRTC — you speak, the agent speaks back on the same stream."
+            "Click **Record**, grant the mic, **talk**, click stop. "
+            "Same stream, both directions (WebRTC + TURN)."
         )
         flag = gr.Textbox(value="—", label="ThinkSpark", elem_id="flag", interactive=False)
         transcript = gr.Textbox(value="…", label="Live transcript", elem_id="meta",
                                 lines=3, interactive=False)
-        webrtc = WebRTC(
+        rtc_kw = dict(
             label="Talk",
             modality="audio",
             mode="send-receive",
-            rtc_configuration=rtc,
             elem_id="orb",
         )
+        try:
+            webrtc = WebRTC(
+                rtc_configuration=ice,
+                server_rtc_configuration=ice,
+                **rtc_kw,
+            )
+        except TypeError:
+            webrtc = WebRTC(rtc_configuration=ice(), **rtc_kw)
         stream_fn = ReplyOnPause(on_pause)
         try:
             stream_fn = ReplyOnPause(
