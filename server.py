@@ -45,6 +45,24 @@ def lan_ip() -> str:
         s.close()
 
 
+def public_ip(timeout: float = 2.0) -> str | None:
+    """The machine's public address, so a remote GPU box prints a URL you can actually
+    connect to. Asks an external echo service for our own IP — nothing else is sent.
+    Returns None (and the banner falls back) if there is no egress."""
+    import urllib.request
+
+    for url in ("https://api.ipify.org", "https://ifconfig.me/ip",
+                "https://icanhazip.com"):
+        try:
+            with urllib.request.urlopen(url, timeout=timeout) as r:
+                ip = r.read().decode().strip()
+                if ip and len(ip) < 46:
+                    return ip
+        except Exception:
+            continue
+    return None
+
+
 def in_container() -> bool:
     """True inside Docker. The container's own IP (172.x) is NOT reachable from a
     browser on the host, so the banner must not advertise it."""
@@ -105,20 +123,28 @@ def build_app(device: str, window: int, denoise: bool):
         line = "=" * 66
         print(f"\n{line}\n  Kupe ThinkSpark Live Agent — ready\n{line}")
 
-        if in_container():
-            # 172.x is the container's private address — a browser on the host cannot
-            # reach it. With `-p 8000:8000` the host's own address is the right one.
-            print("  running in Docker — connect via the HOST, not the container IP\n")
-            print(f"  Paste this into the UI:\n\n      ws://localhost:{PORT}/ws\n")
-            print("  From another device on your LAN, use the host machine's IP:")
-            print(f"      ws://<HOST-LAN-IP>:{PORT}/ws\n")
-            print(f"  Requires the container to be started with  -p {PORT}:{PORT}")
-            print(f"  health:  http://localhost:{PORT}/health")
+        pub = public_ip()
+        containerised = in_container()
+
+        if pub:
+            print(f"  Paste this into the UI:\n\n      ws://{pub}:{PORT}/ws\n")
         else:
-            ip = lan_ip()
-            print(f"  Paste this into the UI:\n\n      ws://{ip}:{PORT}/ws\n")
-            print(f"  local:   ws://127.0.0.1:{PORT}/ws")
-            print(f"  health:  http://{ip}:{PORT}/health")
+            print(f"  Paste this into the UI:\n\n      ws://localhost:{PORT}/ws\n")
+
+        if containerised:
+            # 172.x is the container's private address — unreachable from a browser.
+            print(f"  same machine:  ws://localhost:{PORT}/ws")
+            print(f"  (container needs  -p {PORT}:{PORT}  for either to work)")
+        else:
+            print(f"  LAN:           ws://{lan_ip()}:{PORT}/ws")
+            print(f"  same machine:  ws://127.0.0.1:{PORT}/ws")
+
+        if pub:
+            print(f"  health:        http://{pub}:{PORT}/health")
+            print(f"\n  NOTE: the public URL only works if port {PORT} is open in your")
+            print("        provider's firewall / security group. No auth on this server.")
+        else:
+            print(f"  health:        http://localhost:{PORT}/health")
 
         print(f"  web UI:  cd web && npm install && npm run dev")
         print(f"{line}\n")
