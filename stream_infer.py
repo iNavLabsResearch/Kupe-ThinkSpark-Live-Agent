@@ -32,8 +32,9 @@ from rich.console import Console
 
 from agent import config
 
-DEFAULT_URL = ("https://a.files.bbci.co.uk/media/live/manifesto/audio/simulcast/hls/"
-               "nonuk/sbr_high/ak/bbc_world_service.m3u8")
+# Live English talk radio — reliable, not geo/rate-blocked. Override with --url.
+# (BBC World Service public HLS is UK-geo/rate-limited and often 404/429 from cloud boxes.)
+DEFAULT_URL = "https://npr-ice.streamguys1.com/live.mp3"
 
 LISTENER_PROMPT = ("You are a calm human listener on a live call. You only decide WHEN "
                    "to listen, hold, back-channel, or interject — you never speak the "
@@ -72,17 +73,37 @@ def resample(x: np.ndarray, src: int, dst: int) -> np.ndarray:
 
 def ffmpeg_reader(url: str, c: Console, q_model: queue.Queue, q_stt: queue.Queue | None,
                   stop: threading.Event):
-    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", url,
+    if not shutil.which("ffmpeg"):
+        c.print("[bold red]ffmpeg not found[/] — apt-get install -y ffmpeg")
+        q_model.put(None)
+        if q_stt is not None:
+            q_stt.put(None)
+        return
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "warning",
+           "-reconnect", "1", "-reconnect_streamed", "1",
+           "-reconnect_delay_max", "5", "-rw_timeout", "15000000",
+           "-user_agent", "Mozilla/5.0", "-i", url,
            "-f", "f32le", "-acodec", "pcm_f32le", "-ac", "1", "-ar", str(SR), "-"]
     c.print(f"[grey58]ffmpeg <- {url}[/]")
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             bufsize=FRAME * 4)
+
+    # surface ffmpeg's own errors on its stderr (so a dead/blocked URL is visible)
+    def _pump_err():
+        for line in iter(proc.stderr.readline, b""):
+            s = line.decode("utf-8", "replace").rstrip()
+            if s:
+                c.print(f"[yellow]ffmpeg: {s}[/]")
+    threading.Thread(target=_pump_err, daemon=True).start()
+
     nbytes = FRAME * 4
+    got = 0
     try:
         while not stop.is_set():
             buf = proc.stdout.read(nbytes)
             if not buf or len(buf) < nbytes:
                 break
+            got += 1
             frame = np.frombuffer(buf, dtype=np.float32).copy()
             for q in (q_model, q_stt):
                 if q is None:
@@ -92,6 +113,9 @@ def ffmpeg_reader(url: str, c: Console, q_model: queue.Queue, q_stt: queue.Queue
                 except queue.Full:
                     pass
     finally:
+        if got == 0:
+            c.print("[bold red]ffmpeg delivered 0 frames[/] — URL likely dead/blocked "
+                    "from this box. Try --url with a reachable stream (see above errors).")
         proc.kill()
         q_model.put(None)
         if q_stt is not None:
