@@ -6,6 +6,7 @@ transformers>=4.49,<4.58
 tokenizers>=0.21,<0.22
 accelerate>=0.34
 huggingface_hub>=0.34,<1
+hf_transfer
 sounddevice>=0.4
 websockets>=12.0
 openai>=1.40
