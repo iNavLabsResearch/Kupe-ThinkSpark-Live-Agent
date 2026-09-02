@@ -16,17 +16,30 @@ const FLAG_COLOR = {
 
 const MIC_RATE = 24000;
 
+function defaultWsUrl() {
+  const { protocol, host, hostname } = window.location;
+  const onNgrok = host.includes("ngrok");
+  if (onNgrok || (hostname !== "localhost" && hostname !== "127.0.0.1")) {
+    const p = protocol === "https:" ? "wss:" : "ws:";
+    let u = `${p}//${host}/ws`;
+    if (onNgrok) u += "?ngrok-skip-browser-warning=true";
+    return u;
+  }
+  const saved = localStorage.getItem("kupe_ws_url") || "";
+  if (saved.includes("proxy.runpod.net")) {
+    localStorage.removeItem("kupe_ws_url");
+    return "ws://127.0.0.1:8000/ws";
+  }
+  return saved || "ws://127.0.0.1:8000/ws";
+}
+
+function withNgrokSkip(url) {
+  if (!url.includes("ngrok") || url.includes("ngrok-skip-browser-warning")) return url;
+  return url + (url.includes("?") ? "&" : "?") + "ngrok-skip-browser-warning=true";
+}
+
 export default function App() {
-  const [url, setUrl] = useState(() => {
-    const saved = localStorage.getItem("kupe_ws_url") || "";
-    // RunPod's HTTPS proxy usually cannot upgrade WebSockets. Keep other wss://
-    // (nginx TLS, Cloudflare, Vast direct IP, etc.).
-    if (saved.includes("proxy.runpod.net")) {
-      localStorage.removeItem("kupe_ws_url");
-      return "ws://127.0.0.1:8000/ws";
-    }
-    return saved || "ws://127.0.0.1:8000/ws";
-  });
+  const [url, setUrl] = useState(() => defaultWsUrl());
   const [status, setStatus] = useState("idle");
   const [events, setEvents] = useState([]);
   const [transcript, setTranscript] = useState("");
@@ -44,7 +57,7 @@ export default function App() {
 
   async function connect() {
     setStatus("connecting");
-    const ws = new WebSocket(url);
+    const ws = new WebSocket(withNgrokSkip(url));
     ws.binaryType = "arraybuffer";
     wsRef.current = ws;
 

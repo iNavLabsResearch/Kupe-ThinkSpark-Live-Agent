@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import argparse
 import os
-import socket
+from pathlib import Path
 from contextlib import asynccontextmanager
 
 from agent import config
@@ -30,36 +30,13 @@ except ImportError:
 
 MIC_RATE = 24_000
 PORT = 8000
-
-
-def _lan_ip() -> str:
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        s.connect(("8.8.8.8", 80))
-        return s.getsockname()[0]
-    except Exception:
-        return "127.0.0.1"
-    finally:
-        s.close()
-
-
-def _public_ip(timeout: float = 2.0) -> str | None:
-    import urllib.request
-
-    for url in ("https://api.ipify.org", "https://ifconfig.me/ip"):
-        try:
-            with urllib.request.urlopen(url, timeout=timeout) as r:
-                ip = r.read().decode().strip()
-                if ip and len(ip) < 46:
-                    return ip
-        except Exception:
-            continue
-    return None
+WEB_APP = Path(__file__).parent / "web" / "app.html"
 
 
 def build_app(device: str, window: int, denoise: bool, use_ngrok: bool):
     from fastapi import FastAPI, WebSocket, WebSocketDisconnect
     from fastapi.middleware.cors import CORSMiddleware
+    from fastapi.responses import FileResponse
 
     from agent.session import WebSession
 
@@ -85,6 +62,10 @@ def build_app(device: str, window: int, denoise: bool, use_ngrok: bool):
         allow_headers=["*"],
     )
 
+    @app.get("/")
+    async def index():
+        return FileResponse(WEB_APP)
+
     @app.get("/health")
     async def health():
         r = state["referee"]
@@ -97,14 +78,17 @@ def build_app(device: str, window: int, denoise: bool, use_ngrok: bool):
 
     @app.websocket("/ws")
     async def ws_endpoint(ws: WebSocket):
+        print(f"ws handshake  origin={ws.headers.get('origin')}  "
+              f"ua={(ws.headers.get('user-agent') or '')[:60]}")
         await ws.accept()
+        print("ws accepted")
         session = WebSession(
             ws, state["referee"], load_keys(), window=window, denoise=denoise
         )
         try:
             await session.run()
         except WebSocketDisconnect:
-            pass
+            print("ws disconnected")
         finally:
             await session.close()
 
@@ -112,21 +96,15 @@ def build_app(device: str, window: int, denoise: bool, use_ngrok: bool):
         line = "=" * 66
         print(f"\n{line}\n  Kupe ThinkSpark Live Agent — ready\n{line}")
         if public_https:
-            print("  Paste this into the UI:\n")
-            print(f"      {expose.to_ws(public_https)}\n")
+            print("  Open this URL in the browser (click ngrok 'Visit Site' once):\n")
+            print(f"      {public_https}\n")
+            print("  Then hit Connect — same origin, WebSockets work.")
+            print("  Do NOT paste wss:// into localhost:5173 (ngrok blocks that).\n")
+            print(f"  ws:      {expose.to_ws(public_https)}")
             print(f"  health:  {public_https}/health")
         else:
-            pub = _public_ip()
-            print("  Paste this into the UI:\n")
-            if pub:
-                print(f"      ws://{pub}:{PORT}/ws")
-            print(f"      ws://{_lan_ip()}:{PORT}/ws")
-            print(f"      ws://127.0.0.1:{PORT}/ws")
-            print()
-            print("  --no-ngrok  (direct IP / local only)")
-            if pub:
-                print(f"  health:  http://{pub}:{PORT}/health")
-        print(f"  local:   ws://127.0.0.1:{PORT}/ws")
+            print("  UI:  http://127.0.0.1:{}/".format(PORT))
+            print(f"  ws:  ws://127.0.0.1:{PORT}/ws")
         print(f"{line}\n")
 
     return app

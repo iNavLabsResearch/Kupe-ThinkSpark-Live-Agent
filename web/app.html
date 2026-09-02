@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Kupe ThinkSpark Live Agent</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; background: #0b0d10; color: #e6e6e6;
+      font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    .app { max-width: 980px; margin: 0 auto; padding: 24px 20px 60px; }
+    header { display: flex; justify-content: space-between; align-items: center;
+      gap: 16px; flex-wrap: wrap; margin-bottom: 22px; }
+    h1 { font-size: 17px; font-weight: 600; margin: 0; letter-spacing: -0.2px; }
+    h1 span { color: #6b7280; font-weight: 400; }
+    .conn { display: flex; align-items: center; gap: 8px; }
+    .conn input {
+      background: #14171c; border: 1px solid #262b33; color: #e6e6e6;
+      padding: 7px 10px; border-radius: 6px; width: min(420px, 70vw);
+      font: inherit; font-size: 12px;
+    }
+    .conn button {
+      background: #2563eb; border: 0; color: #fff; padding: 7px 14px;
+      border-radius: 6px; cursor: pointer; font: inherit; font-size: 12px; font-weight: 500;
+    }
+    .conn button.stop { background: #dc2626; }
+    .dot { width: 9px; height: 9px; border-radius: 50%; background: #4b5563; }
+    .dot.connected { background: #22c55e; box-shadow: 0 0 8px #22c55e88; }
+    .dot.connecting { background: #eab308; }
+    .dot.error, .dot.closed { background: #ef4444; }
+    .hero {
+      border: 1px solid #1d222a; border-radius: 10px; background: #101317;
+      padding: 26px; text-align: center; margin-bottom: 18px;
+    }
+    .flag { font-size: 30px; font-weight: 700; }
+    .meta { color: #6b7280; font-size: 12px; margin-top: 6px; }
+    .transcript { margin-top: 16px; color: #cbd5e1; min-height: 22px; font-size: 15px; }
+    .log {
+      border: 1px solid #1d222a; border-radius: 10px; background: #0e1115;
+      max-height: 460px; overflow-y: auto; padding: 6px 0;
+    }
+    .row { display: grid; grid-template-columns: 84px 130px 1fr;
+      gap: 10px; padding: 3px 14px; font-size: 12.5px; }
+    .time { color: #4b5563; }
+    .kind { color: #9ca3af; font-weight: 600; }
+    .detail { color: #d1d5db; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .hint { color: #6b7280; font-size: 12px; margin: 0 0 16px; }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header>
+      <h1>Kupe ThinkSpark <span>Live Agent</span></h1>
+      <div class="conn">
+        <input id="url" />
+        <button id="btn">Connect</button>
+        <span id="dot" class="dot"></span>
+      </div>
+    </header>
+    <p class="hint">Open this page on the ngrok https URL, click through the warning once, then Connect. Mic needs a secure origin.</p>
+    <section class="hero">
+      <div class="flag" id="flag">—</div>
+      <div class="meta" id="meta">0 frames · p50 0.0 ms · budget 80 ms</div>
+      <div class="transcript" id="transcript">…</div>
+    </section>
+    <section class="log" id="log"></section>
+  </div>
+  <script>
+    const MIC_RATE = 24000;
+    const FLAG_COLOR = {
+      LISTEN: "#8b8b8b", HOLD: "#6fa8ff", INCOMPLETE: "#e6d47a",
+      TURN_END: "#4ade80", BARGE_SOFT: "#fb923c", BARGE_HARD: "#f87171",
+      CONTINUE: "#a3a3a3", PREFETCH_LLM: "#e879f9", COMMIT_LLM: "#22d3ee",
+      CANCEL_LLM: "#facc15", SILENCE_BREAK: "#60a5fa",
+    };
+
+    function sameOriginWs() {
+      const p = location.protocol === "https:" ? "wss:" : "ws:";
+      let u = p + "//" + location.host + "/ws";
+      if (location.host.includes("ngrok")) u += "?ngrok-skip-browser-warning=true";
+      return u;
+    }
+    function skipNgrok(u) {
+      if (!u.includes("ngrok") || u.includes("ngrok-skip-browser-warning")) return u;
+      return u + (u.includes("?") ? "&" : "?") + "ngrok-skip-browser-warning=true";
+    }
+
+    const $url = document.getElementById("url");
+    const $btn = document.getElementById("btn");
+    const $dot = document.getElementById("dot");
+    const $flag = document.getElementById("flag");
+    const $meta = document.getElementById("meta");
+    const $tr = document.getElementById("transcript");
+    const $log = document.getElementById("log");
+
+    $url.value = location.host.includes("ngrok")
+      ? sameOriginWs()
+      : (localStorage.getItem("kupe_ws_url") || sameOriginWs());
+
+    let ws, stream, ctx, playHead = 0, frames = 0, lats = [];
+    let status = "idle";
+
+    function setStatus(s) {
+      status = s;
+      $dot.className = "dot " + s;
+      $btn.textContent = s === "connected" ? "Disconnect" : "Connect";
+      $btn.className = s === "connected" ? "stop" : "";
+      $url.disabled = s === "connected";
+    }
+    function push(kind, detail, flag) {
+      const row = document.createElement("div");
+      row.className = "row";
+      row.innerHTML = `<span class="time">${new Date().toLocaleTimeString()}</span>`
+        + `<span class="kind" style="${flag && FLAG_COLOR[kind] ? "color:"+FLAG_COLOR[kind] : ""}">${kind}</span>`
+        + `<span class="detail">${detail || ""}</span>`;
+      $log.appendChild(row);
+      $log.scrollTop = $log.scrollHeight;
+    }
+
+    async function connect() {
+      if (status === "connected") { disconnect(); return; }
+      setStatus("connecting");
+      const url = skipNgrok($url.value.trim());
+      ws = new WebSocket(url);
+      ws.binaryType = "arraybuffer";
+      ws.onopen = async () => {
+        localStorage.setItem("kupe_ws_url", url);
+        setStatus("connected");
+        await startMic();
+      };
+      ws.onerror = () => setStatus("error");
+      ws.onclose = () => { setStatus("closed"); stopMic(); };
+      ws.onmessage = (ev) => {
+        if (ev.data instanceof ArrayBuffer) return playPcm(ev.data);
+        const m = JSON.parse(ev.data);
+        if (m.type === "flag") {
+          if (m.raw) {
+            lats.push(m.latency_ms);
+            if (lats.length > 300) lats.shift();
+            const s = [...lats].sort((a,b) => a-b);
+            frames += 1;
+            $meta.textContent = `${frames} frames · p50 ${(s[Math.floor(s.length/2)]||0).toFixed(1)} ms · budget 80 ms`;
+          } else {
+            $flag.textContent = m.flag;
+            $flag.style.color = FLAG_COLOR[m.flag] || "#555";
+            push(m.flag, m.latency_ms + " ms", true);
+          }
+        } else if (m.type === "stt") {
+          $tr.textContent = m.text;
+          if (m.final) push("stt-final", m.text);
+        } else if (m.type === "action") {
+          push(m.kind, m.detail);
+        } else if (m.type === "tts_start") {
+          push("tts", m.text);
+        } else if (m.type === "log") {
+          push(m.kind, m.detail);
+        }
+      };
+    }
+
+    async function startMic() {
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: { channelCount: 1, echoCancellation: true, noiseSuppression: false },
+      });
+      ctx = new AudioContext({ sampleRate: MIC_RATE });
+      const src = ctx.createMediaStreamSource(stream);
+      const node = ctx.createScriptProcessor(2048, 1, 1);
+      node.onaudioprocess = (e) => {
+        if (!ws || ws.readyState !== WebSocket.OPEN) return;
+        const f32 = e.inputBuffer.getChannelData(0);
+        const i16 = new Int16Array(f32.length);
+        for (let i = 0; i < f32.length; i++) i16[i] = Math.max(-1, Math.min(1, f32[i])) * 32767;
+        ws.send(i16.buffer);
+      };
+      src.connect(node);
+      node.connect(ctx.destination);
+    }
+    function stopMic() {
+      stream && stream.getTracks().forEach((t) => t.stop());
+      ctx && ctx.close();
+      stream = null; ctx = null;
+    }
+    function playPcm(buf) {
+      if (!ctx) return;
+      const i16 = new Int16Array(buf);
+      const f32 = new Float32Array(i16.length);
+      for (let i = 0; i < i16.length; i++) f32[i] = i16[i] / 32768;
+      const b = ctx.createBuffer(1, f32.length, MIC_RATE);
+      b.copyToChannel(f32, 0);
+      const s = ctx.createBufferSource();
+      s.buffer = b;
+      s.connect(ctx.destination);
+      const now = ctx.currentTime;
+      const at = Math.max(now, playHead);
+      s.start(at);
+      playHead = at + b.duration;
+    }
+    function disconnect() {
+      ws && ws.close();
+      stopMic();
+    }
+    $btn.onclick = connect;
+  </script>
+</body>
+</html>

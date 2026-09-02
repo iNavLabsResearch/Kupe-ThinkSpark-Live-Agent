@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-from typing import Optional
 
 # Fallback if .env / the environment has no token (Colab, Kaggle, fresh pods).
 _DEFAULT_NGROK_AUTHTOKEN = "3Imhi3otkOTZqNt0Ln1FuXbq69a_7buSE2HNJSsJnzM5mVWRb"
@@ -18,10 +17,14 @@ def auth_token() -> str:
 def to_ws(https_url: str) -> str:
     u = https_url.rstrip("/")
     if u.startswith("https://"):
-        return "wss://" + u[len("https://"):] + "/ws"
-    if u.startswith("http://"):
-        return "ws://" + u[len("http://"):] + "/ws"
-    return u + "/ws"
+        ws = "wss://" + u[len("https://"):] + "/ws"
+    elif u.startswith("http://"):
+        ws = "ws://" + u[len("http://"):] + "/ws"
+    else:
+        ws = u + "/ws"
+    if "ngrok" in ws and "ngrok-skip-browser-warning" not in ws:
+        ws += "?ngrok-skip-browser-warning=true"
+    return ws
 
 
 def open_ngrok(port: int) -> str:
@@ -40,13 +43,19 @@ def open_ngrok(port: int) -> str:
     except Exception:
         pass
 
-    kwargs = {}
+    kwargs = {"inspect": False}
     domain = os.environ.get("NGROK_DOMAIN", "").strip()
     if domain:
         kwargs["hostname"] = domain
 
     try:
         _tunnel = ngrok.connect(addr=port, proto="http", **kwargs)
+    except TypeError:
+        kwargs.pop("inspect", None)
+        try:
+            _tunnel = ngrok.connect(addr=port, proto="http", **kwargs)
+        except Exception as e:
+            raise SystemExit(f"ngrok failed to start: {e}") from e
     except Exception as e:
         raise SystemExit(f"ngrok failed to start: {e}") from e
 
