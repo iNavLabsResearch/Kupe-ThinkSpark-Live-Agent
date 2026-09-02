@@ -132,7 +132,10 @@ class KrutrimLLM:
         )
         try:
             async for event in stream:
-                delta = event.choices[0].delta.content or ""
+                choices = getattr(event, "choices", None) or []
+                if not choices:
+                    continue
+                delta = getattr(choices[0].delta, "content", None) or ""
                 if delta:
                     chunks.append(delta)
                     yield delta
