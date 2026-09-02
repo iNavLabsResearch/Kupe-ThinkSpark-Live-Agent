@@ -201,6 +201,32 @@ web/                  React UI — paste the URL, talk
 .env.example          key template
 ```
 
+## Public URL (thinkspark.kupe.in)
+
+On RunPod and most rented GPU hosts, inbound port 8000 is **never routed to your
+container** — so nginx, a reverse proxy, or a DNS A record cannot help. The packets do
+not reach the box. A tunnel dials *out* instead, so nothing has to be opened.
+
+```bash
+./tunnel.sh quick     # throwaway https URL in ~10s, no account needed
+./tunnel.sh setup     # bind thinkspark.kupe.in permanently (Cloudflare account)
+./tunnel.sh run       # run the configured tunnel
+```
+
+`setup` creates the DNS record for you via the Cloudflare API — you do **not** add an
+A record by hand. It writes a CNAME to `<tunnel-id>.cfargotunnel.com`, which is the only
+form that works (a CNAME to RunPod's own proxy fails, because that proxy routes on its
+own hostname and will not match `thinkspark.kupe.in`).
+
+Then connect the UI to:
+
+```
+wss://thinkspark.kupe.in/ws
+```
+
+Note `wss://`, not `ws://` — the tunnel terminates TLS, and a browser on an https page
+refuses plaintext websockets.
+
 ## Model weights
 
 Loads the finetuned checkpoint directly:
