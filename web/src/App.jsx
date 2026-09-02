@@ -17,9 +17,15 @@ const FLAG_COLOR = {
 const MIC_RATE = 24000;
 
 export default function App() {
-  const [url, setUrl] = useState(
-    localStorage.getItem("kupe_ws_url") || "ws://127.0.0.1:8000/ws"
-  );
+  const [url, setUrl] = useState(() => {
+    const saved = localStorage.getItem("kupe_ws_url") || "";
+    // RunPod's HTTPS proxy does not upgrade WebSockets. SSH tunnel = localhost.
+    if (saved.includes("proxy.runpod.net") || saved.startsWith("wss://")) {
+      localStorage.removeItem("kupe_ws_url");
+      return "ws://127.0.0.1:8000/ws";
+    }
+    return saved || "ws://127.0.0.1:8000/ws";
+  });
   const [status, setStatus] = useState("idle");
   const [events, setEvents] = useState([]);
   const [transcript, setTranscript] = useState("");
