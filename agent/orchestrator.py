@@ -130,8 +130,6 @@ class FloorAgent:
         self._turn_busy = False
         self._tasks: list[asyncio.Task] = []
         self._dirty = True
-        self._spoken_latch: dict[str, str] = {}
-        self._spoken_claimed = False
         self._echo_until = 0.0
         self._play_until = 0.0
         self._last_tts_text = ""
@@ -320,81 +318,62 @@ class FloorAgent:
         self._dirty = True
         return row
 
-    def _claim_backchannel(self) -> bool:
-        """Sync latch so LISTEN frames cannot queue parallel spoken TTS."""
-        if self._speaking or self._spoken_claimed or self._echo_active():
-            return False
-        now = time.time()
-        if now - self.policy._last_backchannel < 2.0:
-            return False
-        self._spoken_claimed = True
-        self.policy._last_backchannel = now
-        return True
-
-    def _should_play_spoken(self, flag: str, spoken: str) -> bool:
-        """LISTEN = user has the floor (stay silent). Spoken TTS only while thinking."""
-        if not spoken or _is_junk_stt(spoken):
-            return False
-        if self._echo_active():
-            return False
-        if flag != "INCOMPLETE":
-            return False
-        return bool(self._stt_str()) and not _is_junk_stt(self._stt_str())
-
+    # -- decisions ------------------------------------------------------ #
     async def _on_decision(self, decision) -> None:
+        """One raw 80 ms flag in. Smooth it, and act only on the smoothed decision.
+
+        The raw flag is decided cheaply every frame by the streaming referee. We never
+        act on a bare 80 ms flag — a single frame flips on noise. The smoother's sliding
+        window + event-latch collapses the stream into one stable decision per real
+        event (Section 10 collar), and only THAT reaches the policy.
+        """
         self.frames += 1
         self.decode_ms.append(decision.latency_ms)
-        spoken = (getattr(decision, "spoken", "") or "").strip()
-        speaking = self._echo_active()
-        playable = (not speaking) and (
-            (decision.flag == "SILENCE_BREAK" and not _is_junk_stt(spoken))
-            or self._should_play_spoken(decision.flag, spoken)
-        )
-        self.ui.frame(decision.flag, decision.latency_ms, raw=True)
-        self._record(decision.flag, spoken if playable else "", decision.latency_ms)
+        raw = decision.flag
+        self.ui.frame(raw, decision.latency_ms, raw=True)
+        self._record(raw, "", decision.latency_ms)
 
-        if speaking:
-            spoken = ""
-        elif spoken and not _is_junk_stt(spoken):
-            self._spoken_latch[decision.flag] = spoken
-            if decision.flag != "SILENCE_BREAK" and playable and self._claim_backchannel():
-                asyncio.create_task(self._spoken_task(spoken, decision.flag))
-
-        smoothed = self.smoother.push(decision.flag)
+        smoothed = self.smoother.push(raw)
         if smoothed is None:
             return
         self.ui.frame(smoothed, decision.latency_ms, raw=False)
-        spoken_for_flag = "" if speaking else self._spoken_latch.get(smoothed, "")
-        asyncio.create_task(self._policy_task(smoothed, spoken_for_flag))
+        asyncio.create_task(self._policy_task(smoothed))
 
-    async def _policy_task(self, flag: str, spoken: str = "") -> None:
+    async def gen_spoken(self) -> str:
+        """Decode a spoken back-channel OFF the event loop, only when the policy asks.
+
+        This is the spoken head — deliberately NOT run every frame (that was the old
+        latency bug). Never runs while the agent is, or is about to be, audible: that
+        would echo the agent's own voice back into STT.
+        """
+        if self._echo_active() or self._closed or self._speaking:
+            return ""
+        loop = asyncio.get_running_loop()
+        state = self.policy.state.value
+        try:
+            text = await loop.run_in_executor(None, self.referee.generate_spoken, state)
+        except Exception as e:
+            self.ui.log("error", f"spoken: {e}")
+            return ""
+        return (text or "").strip()
+
+    async def _policy_task(self, flag: str) -> None:
         urgent = flag in {"BARGE_HARD", "BARGE_SOFT", "CANCEL_LLM"}
-        idle = flag in {"LISTEN", "HOLD", "CONTINUE", "INCOMPLETE"}
+        idle = flag in {"LISTEN", "HOLD", "CONTINUE", "INCOMPLETE", "SILENCE_BREAK"}
+        # A turn-committing flag (TURN_END / PREFETCH / COMMIT) must not stack on an
+        # in-flight turn; idle/urgent flags are always allowed through.
         if not urgent and not idle and self._turn_busy:
             return
         if not urgent and not idle:
             self._turn_busy = True
         try:
-            if flag == "SILENCE_BREAK":
-                spoken = self._spoken_latch.pop("SILENCE_BREAK", spoken)
-            action = await self.policy.handle(flag, spoken=spoken)
+            action = await self.policy.handle(flag)
         except Exception as e:
             self.ui.log("error", f"policy {flag}: {e}")
             return
         finally:
             if not urgent and not idle:
                 self._turn_busy = False
-        if action:
-            self._note_action(action)
-
-    async def _spoken_task(self, text: str, flag: str = "") -> None:
-        try:
-            action = await self.policy.on_spoken(text, flag=flag)
-        except Exception as e:
-            self.ui.log("error", f"spoken: {e}")
-            return
-        finally:
-            self._spoken_claimed = False
         if action:
             self._note_action(action)
 
@@ -537,4 +516,11 @@ class FloorAgent:
         self._user_partial = ""
         self._user_final = ""
         self.stt.reset_turn()
+        # a committed turn is a floor boundary: clear the referee's rolling audio history
+        # + KV cache + Mimi context so the next turn starts clean (and the cache stays
+        # bounded well inside the backbone's sliding window).
+        try:
+            self.referee.reset()
+        except Exception:
+            pass
         self._refresh_context()

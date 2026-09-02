@@ -173,16 +173,40 @@ that always does.
 
 Ctrl+C prints decode p50/p95 and a flag histogram.
 
-## Latency
+## Latency — how it stays real-time
 
-ThinkSpark decodes in ~3 ms on a datacenter GPU and ~25-50 ms on Apple Silicon, against
-an 80 ms frame budget. The SDK tunes the backend per device: TF32 + cuDNN autotune +
-bf16 weights on CUDA (3060/4060/3090/4090/5090, L4, H100, RTX 6000), capped thread count
-on CPU, fp32 on MPS. A warmup pass runs at load so the first real frame is not the slow
-one.
+The referee is a **streaming KV-cache decoder**. The system prompt + rolling agent/STT
+text + audio history live in a persistent cache; a normal 80 ms frame embeds **one** new
+Mimi token and runs **one** incremental transformer step (O(1) per frame). The cache is
+rebuilt only when the text prefix actually changes (a new STT partial, the agent
+starting/finishing speech) — infrequent against the 80 ms clock.
 
-If p95 creeps over 80 ms on your machine, frames queue and the agent drifts behind live
-audio. Watch the summary line; if it does, run on CUDA or raise `--window`.
+This replaced the old reference loop, which re-ran the whole ~96-frame window every frame
+in fp32 *and* — because `LISTEN`, the most common flag, was a "speaking" flag — greedy-
+decoded the spoken head up to 12 times per frame. That was 2-13 full-sequence forwards
+per 80 ms frame, so the referee fell behind live audio and replies only surfaced after
+the user had long stopped. Now:
+
+- **KV-cache streaming** — O(1) per frame instead of O(window).
+- **bf16 on CUDA** (training precision), fp32 on MPS/CPU. No more forced fp32.
+- **Streaming Mimi encode** — rolling context, so per-frame tokens match the offline
+  tokens the model trained on (a bare per-frame encode fed it context-less "first frames").
+- **Spoken head decoupled** — the control flag is decided every frame (cheap); the spoken
+  head only runs via `generate_spoken()` when the policy has *decided* to speak, off the
+  event loop, from a clone of the live cache. Never every frame.
+- **Prefetch hides the LLM** — a speculative reply is started at `PREFETCH_LLM` and played
+  at `TURN_END`/`COMMIT_LLM`, so perceived reply latency is TTS-first-chunk, not a full
+  LLM round trip.
+
+Prove it on your serving box (no provider keys needed, just `HF_TOKEN`):
+
+```bash
+python verify_streaming.py
+```
+
+It asserts the streaming flags equal the reference flags **bit-for-bit** and prints decode
+p50/p95 against the 80 ms budget (guide target: p95 ≤ 40 ms). If p95 creeps over 80 ms,
+frames queue — run on CUDA or raise `--window`.
 
 ## Layout
 

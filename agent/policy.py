@@ -58,7 +58,6 @@ class Policy:
         self._speculated_text: str = ""
         self._last_silence_break = 0.0
         self._last_backchannel = 0.0
-        self._model_spoken = ""
 
     def _user_stt(self) -> str:
         if hasattr(self.agent, "_stt_str"):
@@ -72,8 +71,7 @@ class Policy:
             self.agent.stt.reset_turn()
 
     # ------------------------------------------------------------------ #
-    async def handle(self, flag: str, spoken: str = "") -> Action | None:
-        self._model_spoken = (spoken or "").strip()
+    async def handle(self, flag: str) -> Action | None:
         fn = getattr(self, f"_on_{flag.lower()}", None)
         if fn is None:
             return None
@@ -89,7 +87,25 @@ class Policy:
         return None
 
     async def _on_incomplete(self) -> Action | None:
-        return None
+        # A pause is not an ending — never commit here. But when the user is clearly
+        # mid-thought, a short thinking-sound ("haan haan...", "hmm") keeps the floor
+        # warm and signals we're still listening (Section 5.3, B6). Heavily debounced.
+        now = time.time()
+        if self.state is not AgentState.IDLE:
+            return None
+        if now - self._last_backchannel < 2.5:
+            return None
+        stt = self._user_stt()
+        if not stt or _is_placeholder(stt):
+            return None
+        if getattr(self.agent, "_speaking", False):
+            return None
+        text = await self.agent.gen_spoken()
+        if not text or _is_placeholder(text):
+            return None
+        self._last_backchannel = now
+        await self.agent.speak(text, filler=True)
+        return Action("SPOKEN", text)
 
     # --- speculation --------------------------------------------------- #
     async def _on_prefetch_llm(self) -> Action | None:
@@ -217,24 +233,6 @@ class Policy:
         return None
 
     # --- dead air ------------------------------------------------------- #
-    async def on_spoken(self, text: str, flag: str = "") -> Action | None:
-        """Spoken-head back-channel. LISTEN is pass — never TTS it."""
-        text = (text or "").strip()
-        if not text or _is_placeholder(text):
-            return None
-        if flag == "LISTEN":
-            return None
-        if self.state is not AgentState.IDLE:
-            return None
-        if getattr(self.agent, "_speaking", False):
-            return None
-        if flag == "INCOMPLETE":
-            stt = self._user_stt()
-            if not stt or _is_placeholder(stt):
-                return None
-        await self.agent.speak(text, filler=True)
-        return Action("SPOKEN", text)
-
     async def _llm_reopen(self) -> str:
         """Guide: SILENCE_BREAK -> tts_stream(spoken or llm_reopen()).
 
@@ -265,7 +263,9 @@ class Policy:
             return None
         if getattr(self.agent, "_speaking", False):
             return None
-        text = self._model_spoken
+        # ask the spoken head for a context-aware re-open; fall back to a one-shot LLM
+        # sentence only if it stays silent (guide: SILENCE_BREAK -> spoken or llm_reopen).
+        text = await self.agent.gen_spoken()
         if not text or _is_placeholder(text):
             text = await self._llm_reopen()
         if not text or _is_placeholder(text):
