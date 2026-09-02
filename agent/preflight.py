@@ -22,7 +22,8 @@ def check() -> None:
         raise SystemExit(
             f"MimiModel import failed (transformers {transformers.__version__})\n"
             f"  {type(cause).__name__}: {cause}\n"
-            "  pip install -U 'transformers>=4.49,<5' accelerate\n"
+            "  CUDA torch needs a matching torchvision (nms):\n"
+            "    pip install torchvision --index-url https://download.pytorch.org/whl/cu124\n"
             "  then ./start.sh"
         ) from e
 

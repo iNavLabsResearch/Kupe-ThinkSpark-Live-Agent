@@ -38,12 +38,35 @@ from kupe import ThinkSpark
 PY
 }
 
+_have_mimi() {
+  $PY - <<'PY' >/dev/null 2>&1
+from transformers import MimiModel
+PY
+}
+
 _have_cuda_torch() {
   $PY - <<'PY' >/dev/null 2>&1
 import torch
-print(torch.__version__, torch.cuda.is_available(), flush=True)
 assert torch.cuda.is_available()
 PY
+}
+
+_install_torchvision() {
+  echo "==> torchvision (MimiModel needs torchvision::nms, must match this torch)"
+  local idx=""
+  if $PY -c "import torch; v=torch.__version__; raise SystemExit(0 if ('cu124' in v or str(torch.version.cuda or '').startswith('12.4')) else 1)" 2>/dev/null; then
+    idx="https://download.pytorch.org/whl/cu124"
+  elif $PY -c "import torch; v=torch.__version__; raise SystemExit(0 if ('cu128' in v or str(torch.version.cuda or '').startswith('12.8')) else 1)" 2>/dev/null; then
+    idx="https://download.pytorch.org/whl/cu128"
+  elif $PY -c "import torch; v=torch.__version__; raise SystemExit(0 if ('cu121' in v or str(torch.version.cuda or '').startswith('12.1')) else 1)" 2>/dev/null; then
+    idx="https://download.pytorch.org/whl/cu121"
+  fi
+  if [[ -n "$idx" ]]; then
+    echo "==> torchvision from $idx"
+    $PY -m pip install -q --prefer-binary --upgrade torchvision --index-url "$idx"
+  else
+    $PY -m pip install -q --prefer-binary --upgrade torchvision
+  fi
 }
 
 if [[ "${SKIP_PIP:-}" == "1" ]]; then
@@ -75,6 +98,10 @@ else
 
   echo "==> deps"
   $PY -m pip install -q --prefer-binary -r requirements.txt
+fi
+
+if [[ "${SKIP_PIP:-}" != "1" ]] && ! _have_mimi; then
+  _install_torchvision
 fi
 
 if [[ "$MODE" == "gradio" ]]; then
