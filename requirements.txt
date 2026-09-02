@@ -1,7 +1,9 @@
 # Pin the audio stack here so a stale system transformers cannot boot-fail.
 # kupe 0.2.x has no subfolder=; 0.3 lives on git until it is on PyPI.
+# tokenizers>=0.23 has no reliable wheels yet — pip compiles Rust and hangs.
 kupe[thinkspark] @ git+https://github.com/kupe-ai/kupe-sdk.git@main
-transformers>=4.49,<5
+transformers>=4.49,<4.58
+tokenizers>=0.21,<0.22
 accelerate>=0.34
 huggingface_hub>=0.34,<1
 sounddevice>=0.4

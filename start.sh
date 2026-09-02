@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-#   ./start.sh --gradio   Colab/Kaggle voice UI (Gradio share, no ngrok)
-#   ./start.sh --server   FastAPI + ngrok
-#   ./start.sh            auto: Gradio on Colab/Kaggle, else FastAPI+ngrok
+#   ./start.sh --gradio   Colab/Kaggle/Vast voice UI (Gradio share, no ngrok)
+#   ./start.sh --server   FastAPI + tunnel
+#   SKIP_PIP=1 ./start.sh --gradio   skip pip entirely
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -30,27 +30,65 @@ if [[ "$MODE" == "auto" ]]; then
 fi
 
 echo "==> python: $(command -v $PY) ($($PY --version))  mode=$MODE"
-$PY -m pip install -q --upgrade pip
 
-if command -v nvidia-smi >/dev/null 2>&1; then
-  echo "==> CUDA torch"
-  $PY -m pip install -q "torch>=2.5" --index-url https://download.pytorch.org/whl/cu124 || \
-    $PY -m pip install -q "torch>=2.5"
+_have_stack() {
+  $PY - <<'PY' >/dev/null 2>&1
+import fastrtc, gradio, kupe, torch, transformers
+from kupe import ThinkSpark
+PY
+}
+
+_have_cuda_torch() {
+  $PY - <<'PY' >/dev/null 2>&1
+import torch
+print(torch.__version__, torch.cuda.is_available(), flush=True)
+assert torch.cuda.is_available()
+PY
+}
+
+if [[ "${SKIP_PIP:-}" == "1" ]]; then
+  echo "==> SKIP_PIP=1 — not installing"
+elif _have_stack; then
+  echo "==> deps already present — skipping pip"
+  $PY -c "import torch; print('==> torch', torch.__version__, 'cuda', torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else '')"
 else
-  $PY -m pip install -q "torch>=2.5"
+  # binary wheels only — tokenizers 0.23+ tries to compile Rust and looks frozen
+  export PIP_ONLY_BINARY="${PIP_ONLY_BINARY:-tokenizers}"
+  $PY -m pip install -q --upgrade pip || true
+
+  if _have_cuda_torch; then
+    echo "==> CUDA torch already present — not reinstalling"
+    $PY -c "import torch; print('==> torch', torch.__version__, torch.cuda.get_device_name(0))"
+  elif command -v nvidia-smi >/dev/null 2>&1; then
+    echo "==> CUDA torch"
+    $PY -m pip install -q --prefer-binary "torch>=2.5" --index-url https://download.pytorch.org/whl/cu124 || \
+      $PY -m pip install -q --prefer-binary "torch>=2.5"
+  else
+    $PY -m pip install -q --prefer-binary "torch>=2.5"
+  fi
+
+  echo "==> pinning tokenizers wheel (no source build)"
+  $PY -m pip install -q --prefer-binary --only-binary=:all: \
+    "tokenizers>=0.21,<0.22" \
+    "transformers>=4.49,<4.58" \
+    "huggingface_hub>=0.34,<1"
+
+  echo "==> deps"
+  $PY -m pip install -q --prefer-binary -r requirements.txt
 fi
 
-echo "==> deps"
-$PY -m pip install -q -r requirements.txt
-
 if [[ "$MODE" == "gradio" ]]; then
-  $PY -m pip install -q "gradio>=4.44,<6" "fastrtc>=0.0.19" "huggingface_hub>=0.34,<1"
+  if [[ "${SKIP_PIP:-}" != "1" ]] && ! $PY -c "import fastrtc, gradio" >/dev/null 2>&1; then
+    $PY -m pip install -q --prefer-binary "gradio>=4.44,<6" "fastrtc>=0.0.19" "huggingface_hub>=0.34,<1"
+  fi
   echo "==> Gradio voice UI — ThinkSpark referee, no VAD, no ngrok. Use the *.gradio.live link."
   exec $PY gradio_app.py
 fi
 
-$PY -m pip install -q -U "transformers>=4.49,<5" "accelerate>=0.34" "huggingface_hub>=0.34,<1" pyngrok
+if [[ "${SKIP_PIP:-}" != "1" ]]; then
+  $PY -m pip install -q --prefer-binary -U "transformers>=4.49,<4.58" "accelerate>=0.34" "huggingface_hub>=0.34,<1" pyngrok
+fi
 echo "==> preflight"
 $PY -c "from agent.preflight import check; check()"
-echo "==> FastAPI + ngrok"
+echo "==> FastAPI + tunnel"
 exec $PY server.py --host 0.0.0.0 --port 8000 "$@"
