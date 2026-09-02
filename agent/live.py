@@ -49,7 +49,7 @@ class LiveAgent:
 
         self.ui = ui
         ui.log("boot", f"loading ThinkSpark on device={device} ...")
-        self.referee = ThinkSpark(device=device)
+        self.referee = ThinkSpark(config.TS_REPO, device=device, subfolder=config.TS_SUBFOLDER)
         ui.log("boot", f"ThinkSpark ready on {self.referee.device}")
 
         self.stt = SonioxSTT(keys.stt, sample_rate=STT_RATE)

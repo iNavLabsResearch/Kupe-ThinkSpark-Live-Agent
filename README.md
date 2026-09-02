@@ -4,9 +4,14 @@ A terminal voice agent where **ThinkSpark controls the pipeline**. Soniox STT, K
 LLM, Sarvam TTS — all streaming — with every start/stop decision made by
 Kupe-ThinkSpark-Realtime-270M running locally on your machine.
 
+```bash
+./setup.sh              # venv + CUDA-matched torch + deps
+./setup.sh --docker     # or run it containerised
+```
+
 **Terminal:**
 ```bash
-pip install -r requirements.txt
+source .venv/bin/activate
 python main.py
 ```
 
@@ -175,6 +180,22 @@ server.py             FastAPI websocket server + LAN URL banner
 web/                  React UI — paste the URL, talk
 .env.example          key template
 ```
+
+## Model weights
+
+Loads the finetuned checkpoint directly:
+
+```
+anuj-inavlabs/kupe-thinkspark-audio-270m
+  phase2/runs/20260902-103400/step5500
+```
+
+That folder carries its own `config.json` and tokenizer, so the backbone is built from
+config and the weights come from `model.pt` — **the gated `google/gemma-3-270m` repo is
+never fetched.** Earlier versions downloaded it only to overwrite every weight seconds
+later, which also meant a 401 for anyone without Gemma access.
+
+Pin a different checkpoint in `agent/config.py` (`TS_REPO` / `TS_SUBFOLDER`).
 
 ## Status
 

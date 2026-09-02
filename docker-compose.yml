@@ -1,0 +1,21 @@
+services:
+  agent:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      # keep the model cache across restarts — 542 MB re-download otherwise
+      - hf-cache:/cache/hf
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+
+volumes:
+  hf-cache:

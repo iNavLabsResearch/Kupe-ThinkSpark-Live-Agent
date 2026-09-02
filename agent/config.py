@@ -5,6 +5,10 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
+# ThinkSpark checkpoint — the finetuned weights, not the base model
+TS_REPO = "anuj-inavlabs/kupe-thinkspark-audio-270m"
+TS_SUBFOLDER = "phase2/runs/20260902-103400/step5500"
+
 LLM_MODEL = "gemma-4-31b-it"
 LLM_BASE_URL = "https://cloud.olakrutrim.com/v1"
 STT_MODEL = "stt-rt-v5"
