@@ -204,17 +204,17 @@ class Policy:
         return None
 
     # --- dead air ------------------------------------------------------- #
-    async def on_spoken(self, text: str) -> Action | None:
-        """Spoken-head back-channel from ThinkSpark (plain text -> TTS)."""
+    async def on_spoken(self, text: str, flag: str = "") -> Action | None:
+        """Spoken-head back-channel. LISTEN requires STT (B2); INCOMPLETE is thinking (B6)."""
         text = (text or "").strip()
         if not text or self.state is not AgentState.IDLE:
             return None
         if getattr(self.agent, "_speaking", False):
             return None
-        now = time.time()
-        if now - self._last_backchannel < 2.0:
-            return None
-        self._last_backchannel = now
+        if flag == "LISTEN":
+            stt = (self.agent.stt.partial or self.agent.stt.final or "").strip()
+            if not stt:
+                return None
         await self.agent.speak(text, filler=True)
         return Action("SPOKEN", text)
 
@@ -245,6 +245,8 @@ class Policy:
         if self.state is not AgentState.IDLE or now - self._last_silence_break < 6.0:
             return None
         if now - self._last_backchannel < 2.0:
+            return None
+        if getattr(self.agent, "_speaking", False):
             return None
         text = self._model_spoken
         if not text:

@@ -113,6 +113,7 @@ class FloorAgent:
         self._tasks: list[asyncio.Task] = []
         self._dirty = True
         self._spoken_latch: dict[str, str] = {}
+        self._spoken_claimed = False
 
     # -- context -------------------------------------------------------- #
     def _refresh_context(self) -> None:
@@ -231,30 +232,62 @@ class FloorAgent:
             spoken=spoken or "",
             stt=self._stt_str(),
             context=self._context_str(),
-            output=output or self.last_output,
+            output=output,
             ms=float(ms),
         )
         self.rows.appendleft(row)
         self._dirty = True
         return row
 
+    def _claim_backchannel(self) -> bool:
+        """Sync latch so LISTEN frames cannot queue parallel spoken TTS."""
+        if self._speaking or self._spoken_claimed:
+            return False
+        if self.policy.state is AgentState.TTS_SPEAKING:
+            return False
+        now = time.time()
+        if now - self.policy._last_backchannel < 2.0:
+            return False
+        self._spoken_claimed = True
+        self.policy._last_backchannel = now
+        return True
+
+    def _should_play_spoken(self, flag: str, spoken: str) -> bool:
+        """Guide: LISTEN is pass; spoken TTS only for real back-channel / thinking."""
+        if not spoken:
+            return False
+        if self._speaking or self.policy.state is AgentState.TTS_SPEAKING:
+            return False
+        if flag == "INCOMPLETE":
+            return True
+        if flag == "LISTEN" and self._stt_str():
+            return True
+        return False
+
     async def _on_decision(self, decision) -> None:
         self.frames += 1
         self.decode_ms.append(decision.latency_ms)
         spoken = (getattr(decision, "spoken", "") or "").strip()
+        speaking = self._speaking or self.policy.state is AgentState.TTS_SPEAKING
+        playable = (not speaking) and (
+            decision.flag == "SILENCE_BREAK"
+            or self._should_play_spoken(decision.flag, spoken)
+        )
         self.ui.frame(decision.flag, decision.latency_ms, raw=True)
-        self._record(decision.flag, spoken, decision.latency_ms)
-        if spoken:
+        self._record(decision.flag, spoken if playable else "", decision.latency_ms)
+
+        if speaking:
+            spoken = ""
+        elif spoken:
             self._spoken_latch[decision.flag] = spoken
-            # SILENCE_BREAK plays spoken in Policy (guide: tts_stream(spoken or llm_reopen))
-            if decision.flag != "SILENCE_BREAK":
-                asyncio.create_task(self._spoken_task(spoken))
+            if decision.flag != "SILENCE_BREAK" and playable and self._claim_backchannel():
+                asyncio.create_task(self._spoken_task(spoken, decision.flag))
 
         smoothed = self.smoother.push(decision.flag)
         if smoothed is None:
             return
         self.ui.frame(smoothed, decision.latency_ms, raw=False)
-        spoken_for_flag = self._spoken_latch.get(smoothed, "")
+        spoken_for_flag = "" if speaking else self._spoken_latch.get(smoothed, "")
         asyncio.create_task(self._policy_task(smoothed, spoken_for_flag))
 
     async def _policy_task(self, flag: str, spoken: str = "") -> None:
@@ -277,24 +310,21 @@ class FloorAgent:
         if action:
             self._note_action(action)
 
-    async def _spoken_task(self, text: str) -> None:
-        if self._turn_busy or self._speaking:
-            return
-        self._turn_busy = True
+    async def _spoken_task(self, text: str, flag: str = "") -> None:
         try:
-            action = await self.policy.on_spoken(text)
+            action = await self.policy.on_spoken(text, flag=flag)
         except Exception as e:
             self.ui.log("error", f"spoken: {e}")
             return
         finally:
-            self._turn_busy = False
+            self._spoken_claimed = False
         if action:
             self._note_action(action)
 
     def _note_action(self, action: Action) -> None:
         self.last_output = f"{action.kind}: {action.detail}"
         self.ui.log(action.kind, action.detail)
-        self._record(action.kind, "", 0.0, self.last_output)
+        self._record(action.kind, "", 0.0, output=self.last_output)
 
     async def _referee_loop(self) -> None:
         loop = asyncio.get_running_loop()
