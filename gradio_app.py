@@ -295,6 +295,12 @@ def main() -> None:
             modality="audio",
             mode="send-receive",
             elem_id="orb",
+            track_constraints={
+                "echoCancellation": True,
+                "noiseSuppression": True,
+                "autoGainControl": True,
+                "channelCount": {"ideal": 1},
+            },
         )
         server_ice = _rtc_config(ttl=360_000)
         try:
@@ -304,7 +310,15 @@ def main() -> None:
                 **rtc_kw,
             )
         except TypeError:
-            webrtc = WebRTC(rtc_configuration=server_ice, **rtc_kw)
+            rtc_kw.pop("track_constraints", None)
+            try:
+                webrtc = WebRTC(
+                    rtc_configuration=ice,
+                    server_rtc_configuration=server_ice,
+                    **rtc_kw,
+                )
+            except TypeError:
+                webrtc = WebRTC(rtc_configuration=server_ice, **rtc_kw)
         webrtc.stream(
             handler,
             inputs=[webrtc],

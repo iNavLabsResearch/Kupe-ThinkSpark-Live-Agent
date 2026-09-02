@@ -1,7 +1,8 @@
 """ThinkSpark floor-control loop shared by Gradio, websocket, and the terminal.
 
 Audio is framed at 80 ms. ThinkSpark is the only VAD/endpoint/barge referee.
-Soniox STT runs in parallel (not as a gate). LLM/TTS fire only when Policy says so.
+AssemblyAI streaming STT runs in parallel (not as a gate). LLM/TTS fire only
+when Policy says so. TTS audio is never fed to STT (echo mute + hangover).
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ import numpy as np
 from agent import config
 from agent.denoise import Denoiser
 from agent.policy import Action, AgentState, Policy
-from agent.providers import KrutrimLLM, SonioxSTT, SonioxTTS
+from agent.providers import AssemblyAISTT, KrutrimLLM, SonioxTTS
 from agent.smoothing import FlagSmoother
 
 MIC_RATE = 24_000
@@ -26,9 +27,6 @@ STT_RATE = 16_000
 FRAME_MS = 80
 FRAME_SAMPLES = MIC_RATE * FRAME_MS // 1000
 TABLE_MAX = 80
-# float32 RMS; silence / fan noise sits well below this, speech is above
-USER_SPEECH_RMS = 0.012
-TTS_ECHO_S = 0.4
 
 
 def _f32_to_pcm16(x: np.ndarray) -> bytes:
@@ -90,7 +88,7 @@ class FloorAgent:
     def __init__(self, referee, keys, ui=None, window: int = 3, denoise: bool = True):
         self.referee = referee
         self.ui = ui or PrintUI()
-        self.stt = SonioxSTT(keys.stt, sample_rate=STT_RATE)
+        self.stt = AssemblyAISTT(keys.stt, sample_rate=STT_RATE)
         self.llm = KrutrimLLM(keys.llm)
         self.tts = SonioxTTS(keys.tts)
         self.denoiser = Denoiser(sample_rate=MIC_RATE, enabled=denoise)
@@ -117,8 +115,7 @@ class FloorAgent:
         self._dirty = True
         self._spoken_latch: dict[str, str] = {}
         self._spoken_claimed = False
-        self._last_rms = 0.0
-        self._tts_echo_until = 0.0
+        self._echo_until = 0.0
 
     # -- context -------------------------------------------------------- #
     def _refresh_context(self) -> None:
@@ -188,7 +185,7 @@ class FloorAgent:
         except Exception as e:
             self.ui.log("error", f"tts failed: {e}")
         self._speaking = False
-        self._tts_echo_until = time.time() + TTS_ECHO_S
+        self._echo_until = time.time() + 0.60
         self.agent_text = ""
         self.policy.state = AgentState.TTS_DONE if not filler else AgentState.IDLE
         self._refresh_context()
@@ -218,16 +215,23 @@ class FloorAgent:
                 except queue.Full:
                     pass
 
+    def _echo_active(self) -> bool:
+        """TTS (and a short hangover) must not land in STT. ThinkSpark still hears the mic."""
+        return (
+            self._speaking
+            or self.policy.state is AgentState.TTS_SPEAKING
+            or time.time() < self._echo_until
+        )
+
     def _step_chunk(self, chunk: np.ndarray) -> list:
         chunk = self.denoiser(chunk)
-        self._last_rms = float(np.sqrt(np.mean(chunk.astype(np.float64) ** 2) + 1e-12))
         pcm = _f32_to_pcm16(_resample(chunk, MIC_RATE, STT_RATE))
+        if self._echo_active():
+            pcm = b"\x00\x00" * (len(pcm) // 2)
         try:
             self._stt_q.put_nowait(pcm)
         except queue.Full:
             pass
-        # Model never trained on agent audio. While we are playing TTS, still run
-        # ThinkSpark on the mic (barge-in) but spoken playback is gated separately.
         return list(self.referee.stream(
             source=[chunk],
             sample_rate=MIC_RATE,
@@ -254,27 +258,12 @@ class FloorAgent:
             return False
         if self.policy.state is AgentState.TTS_SPEAKING:
             return False
-        if time.time() < self._tts_echo_until:
-            return False
         now = time.time()
         if now - self.policy._last_backchannel < 2.0:
             return False
         self._spoken_claimed = True
         self.policy._last_backchannel = now
         return True
-
-    def _user_is_talking(self) -> bool:
-        """Back-channel (B2) while the user is speaking — do not wait for STT.
-
-        ThinkSpark is ~80 ms; Soniox partials lag. Energy is the live 'user talking'
-        bit. STT is a second vote once tokens exist. Silence has low RMS so LISTEN
-        + 'I see' does not TTS.
-        """
-        if time.time() < self._tts_echo_until:
-            return False
-        if self._last_rms >= USER_SPEECH_RMS:
-            return True
-        return bool(self._stt_str())
 
     def _should_play_spoken(self, flag: str, spoken: str) -> bool:
         """Guide: LISTEN is pass; spoken TTS only for real back-channel / thinking."""
@@ -284,7 +273,7 @@ class FloorAgent:
             return False
         if flag == "INCOMPLETE":
             return True
-        if flag == "LISTEN" and self._user_is_talking():
+        if flag == "LISTEN" and self._stt_str():
             return True
         return False
 
@@ -292,11 +281,7 @@ class FloorAgent:
         self.frames += 1
         self.decode_ms.append(decision.latency_ms)
         spoken = (getattr(decision, "spoken", "") or "").strip()
-        speaking = (
-            self._speaking
-            or self.policy.state is AgentState.TTS_SPEAKING
-            or time.time() < self._tts_echo_until
-        )
+        speaking = self._speaking or self.policy.state is AgentState.TTS_SPEAKING
         playable = (not speaking) and (
             decision.flag == "SILENCE_BREAK"
             or self._should_play_spoken(decision.flag, spoken)
@@ -384,11 +369,13 @@ class FloorAgent:
             async for text, is_final in self.stt.transcripts():
                 if self._closed:
                     return
+                if self._echo_active():
+                    continue
                 self._refresh_context()
                 self._dirty = True
                 kind = "stt-final" if is_final else "stt"
                 self.ui.log(kind, text)
-                if is_final and "<end>" in text:
+                if is_final:
                     if self._turn_busy:
                         continue
                     self._turn_busy = True
@@ -407,7 +394,8 @@ class FloorAgent:
         self.ui.log(
             "boot",
             f"ready · {getattr(self.referee, 'device', '?')} · "
-            f"{config.LLM_MODEL} · {config.TTS_MODEL}/{config.TTS_VOICE}",
+            f"AssemblyAI {config.STT_MODEL} · {config.LLM_MODEL} · "
+            f"{config.TTS_MODEL}/{config.TTS_VOICE}",
         )
         self._tasks = [
             asyncio.create_task(self._referee_loop()),

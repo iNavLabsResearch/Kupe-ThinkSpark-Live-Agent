@@ -2,7 +2,7 @@
 """Kupe ThinkSpark Live Agent — terminal voice agent driven by ThinkSpark decisions.
 
     pip install -r requirements.txt
-    export SUPABASE_DB_URL=postgres://...        # or the three *_API_KEY vars
+    export ASSEMBLYAI_API_KEY=... SONIOX_API_KEY=... KRUTRIM_API_KEY=...
     python main.py
 
 Ctrl+C to stop.

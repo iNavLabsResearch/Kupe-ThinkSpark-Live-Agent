@@ -166,7 +166,7 @@ class Policy:
                 self.state = AgentState.IDLE
 
     async def commit_from_stt(self) -> Action | None:
-        """Soniox signalled end-of-utterance. ThinkSpark decides *when* to speak, but
+        """AssemblyAI signalled end_of_turn. ThinkSpark decides *when* to speak, but
         the STT endpoint is a hard ground truth: if the model has not produced a
         TURN_END by the time the transcript is final, commit anyway rather than
         leaving the user hanging."""
@@ -205,14 +205,16 @@ class Policy:
 
     # --- dead air ------------------------------------------------------- #
     async def on_spoken(self, text: str, flag: str = "") -> Action | None:
-        """Spoken-head back-channel. LISTEN = user talking (energy or STT). INCOMPLETE = thinking."""
+        """Spoken-head back-channel. LISTEN requires STT (B2); INCOMPLETE is thinking (B6)."""
         text = (text or "").strip()
         if not text or self.state is not AgentState.IDLE:
             return None
         if getattr(self.agent, "_speaking", False):
             return None
-        if flag == "LISTEN" and not self.agent._user_is_talking():
-            return None
+        if flag == "LISTEN":
+            stt = (self.agent.stt.partial or self.agent.stt.final or "").strip()
+            if not stt:
+                return None
         await self.agent.speak(text, filler=True)
         return Action("SPOKEN", text)
 

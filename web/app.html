@@ -169,7 +169,10 @@
         ws.send(i16.buffer);
       };
       src.connect(node);
-      node.connect(ctx.destination);
+      const mute = ctx.createGain();
+      mute.gain.value = 0;
+      node.connect(mute);
+      mute.connect(ctx.destination);
     }
     function stopMic() {
       stream && stream.getTracks().forEach((t) => t.stop());

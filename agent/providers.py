@@ -1,8 +1,4 @@
-"""Streaming provider clients: Soniox STT, Krutrim LLM, Soniox TTS (voice Mina).
-
-All three stream. The agent needs partial transcripts to speculate on, token-by-token LLM
-output to start speaking early, and TTS audio in chunks so a barge-in can cut it mid-word.
-"""
+"""Streaming provider clients: AssemblyAI STT, Krutrim LLM, Soniox TTS (voice Mina)."""
 
 from __future__ import annotations
 
@@ -16,10 +12,11 @@ from agent import config
 
 
 # --------------------------------------------------------------------------- #
-# STT — Soniox realtime websocket
+# STT — AssemblyAI streaming v3 websocket (PCM16le)
+# https://www.assemblyai.com/docs/streaming/getting-started/transcribe-streaming-audio
 # --------------------------------------------------------------------------- #
-class SonioxSTT:
-    """Streaming STT. Feed PCM16 bytes, read partial + final transcripts."""
+class AssemblyAISTT:
+    """Streaming STT. Feed PCM16 bytes, read partial + final turns."""
 
     def __init__(self, api_key: str, language_hints: list[str] | None = None,
                  sample_rate: int = 16_000):
@@ -31,18 +28,33 @@ class SonioxSTT:
         self.final = ""
 
     async def connect(self):
+        from urllib.parse import urlencode
+
         import websockets
 
-        self._ws = await websockets.connect(config.STT_WS_URL, max_size=None)
-        await self._ws.send(json.dumps({
-            "api_key": self.api_key,
-            "model": config.STT_MODEL,
-            "audio_format": "pcm_s16le",
-            "sample_rate": self.sample_rate,
-            "num_channels": 1,
-            "language_hints": self.language_hints,
-            "enable_endpoint_detection": True,
-        }))
+        langs = [c for c in (self.language_hints or []) if c in {"en", "hi"}] or ["en", "hi"]
+        qs = urlencode({
+            "sample_rate": str(self.sample_rate),
+            "encoding": "pcm_s16le",
+            "speech_model": config.STT_MODEL,
+            "format_turns": "true",
+            "include_partial_turns": "true",
+            "language_codes": json.dumps(langs, separators=(",", ":")),
+        })
+        url = f"{config.STT_WS_URL}?{qs}"
+        headers = {"Authorization": self.api_key}
+        try:
+            self._ws = await websockets.connect(
+                url, additional_headers=headers, max_size=None,
+            )
+        except TypeError:
+            self._ws = await websockets.connect(
+                url, extra_headers=headers, max_size=None,
+            )
+        raw = await self._ws.recv()
+        msg = json.loads(raw) if isinstance(raw, str) else {}
+        if msg.get("type") == "Error" or msg.get("error"):
+            raise RuntimeError(f"assemblyai stt: {msg.get('error') or msg}")
         return self
 
     async def send_audio(self, pcm16: bytes) -> None:
@@ -50,55 +62,49 @@ class SonioxSTT:
             await self._ws.send(pcm16)
 
     async def transcripts(self) -> AsyncIterator[tuple[str, bool]]:
-        """Yields (text, is_final) as Soniox emits tokens."""
+        """Yields (text, is_final) from AssemblyAI Turn events."""
         if not self._ws:
             return
         async for raw in self._ws:
             if isinstance(raw, bytes):
                 continue
             msg = json.loads(raw)
-            if msg.get("error_code"):
-                raise RuntimeError(f"soniox stt: {msg.get('error_message')}")
-
-            final_txt, partial_txt = "", ""
-            for tok in msg.get("tokens", []):
-                if tok.get("is_final"):
-                    final_txt += tok.get("text", "")
-                else:
-                    partial_txt += tok.get("text", "")
-
-            if final_txt:
-                # <end> is Soniox's endpoint marker, not words the user said
-                self.final += final_txt.replace("<end>", "")
-                yield final_txt, True
-            if partial_txt:
-                self.partial = partial_txt
-                yield partial_txt, False
+            typ = msg.get("type")
+            if typ in ("Begin", "Termination", "SessionInformation"):
+                continue
+            if typ == "Error" or msg.get("error"):
+                raise RuntimeError(f"assemblyai stt: {msg.get('error') or msg}")
+            if typ != "Turn":
+                continue
+            text = (msg.get("transcript") or msg.get("utterance") or "").strip()
+            if not text:
+                continue
+            self.partial = text
+            if msg.get("end_of_turn"):
+                self.final = text
+                yield text, True
+            else:
+                yield text, False
 
     async def transcribe_clip(self, pcm16: bytes, timeout: float = 12.0) -> str:
-        """One-shot clip STT for Gradio. Connect, send, wait for a final, close."""
         await self.connect()
-        # pad a bit of silence so endpoint detection fires
         silence = b"\x00\x00" * (self.sample_rate // 4)
         await self.send_audio(pcm16 + silence)
         try:
-            await self._ws.send(json.dumps({"type": "finalize"}))
+            await self._ws.send(json.dumps({"type": "Terminate"}))
         except Exception:
             pass
         text = ""
         try:
             async with asyncio.timeout(timeout):
                 async for tok, is_final in self.transcripts():
+                    text = tok
                     if is_final:
-                        text += tok.replace("<end>", "")
-                        if "<end>" in tok:
-                            break
+                        break
         except TimeoutError:
             pass
         await self.close()
         return (text or self.final).strip()
-        self.partial = ""
-        self.final = ""
 
     def reset_turn(self) -> None:
         self.partial = ""
@@ -106,7 +112,15 @@ class SonioxSTT:
 
     async def close(self) -> None:
         if self._ws:
+            try:
+                await self._ws.send(json.dumps({"type": "Terminate"}))
+            except Exception:
+                pass
             await self._ws.close()
+            self._ws = None
+
+
+SonioxSTT = AssemblyAISTT
 
 
 # --------------------------------------------------------------------------- #

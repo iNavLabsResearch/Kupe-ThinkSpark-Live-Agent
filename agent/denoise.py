@@ -1,7 +1,7 @@
 """RNNoise denoising, applied once at the microphone.
 
 Placed at the head of the pipeline so a single pass cleans the audio for *both*
-consumers — ThinkSpark's frame decisions and Soniox's transcription. Denoising twice
+consumers — ThinkSpark's frame decisions and AssemblyAI's transcription. Denoising twice
 would double the CPU cost for no benefit.
 
 Why it matters for ThinkSpark specifically: the model decides on 80 ms of audio at a

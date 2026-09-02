@@ -111,8 +111,11 @@ export default function App() {
         i16[i] = Math.max(-1, Math.min(1, f32[i])) * 32767;
       ws.send(i16.buffer);
     };
-    src.connect(node);
-    node.connect(ctx.destination);
+      src.connect(node);
+      const mute = ctx.createGain();
+      mute.gain.value = 0;
+      node.connect(mute);
+      mute.connect(ctx.destination);
   }
 
   function stopMic() {

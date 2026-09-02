@@ -29,6 +29,8 @@ class _WsUI:
 
     def log(self, kind: str, detail: str = "", style: str = "") -> None:
         self._send({"type": "log", "kind": kind, "detail": detail})
+        if kind in ("stt", "stt-final") and detail:
+            self._send({"type": "stt", "text": detail, "final": kind == "stt-final"})
 
     def frame(self, flag: str, latency_ms: float, raw: bool = False) -> None:
         self._send({"type": "flag", "flag": flag,

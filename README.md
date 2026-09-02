@@ -1,8 +1,8 @@
 # Kupe ThinkSpark Live Agent
 
-A terminal voice agent where **ThinkSpark controls the pipeline**. Soniox STT, Krutrim
-LLM, Sarvam TTS — all streaming — with every start/stop decision made by
-Kupe-ThinkSpark-Realtime-270M running locally on your machine.
+A terminal voice agent where **ThinkSpark controls the pipeline**. AssemblyAI
+streaming STT, Krutrim LLM, Soniox TTS — all streaming — with every start/stop
+decision made by Kupe-ThinkSpark-Realtime-270M running locally on your machine.
 
 ```bash
 ./setup.sh              # venv + CUDA-matched torch + deps
@@ -66,7 +66,7 @@ Keys live in `.env` (gitignored) or `agent/keys.py`. Copy `.env.example` to star
 | stage | provider | model | streaming |
 |---|---|---|---|
 | floor control | **ThinkSpark** (local) | Kupe-ThinkSpark-Realtime-270M | 80 ms frames |
-| STT | Soniox | `stt-rt-v5` | websocket |
+| STT | AssemblyAI | `universal-3-5-pro` streaming | websocket (`wss://streaming.assemblyai.com/v3/ws`) |
 | LLM | Krutrim | `gemma-4-31b-it` | SSE deltas |
 | TTS | Soniox | `tts-rt-v2` / voice **Mina** | websocket, chunk-by-chunk |
 
@@ -126,7 +126,7 @@ and watch the noise get filtered in real time.
 ## Noise reduction
 
 RNNoise runs **once, at the microphone**, before the fan-out — so a single pass cleans
-the audio for both ThinkSpark and Soniox. Denoising per-consumer would double the CPU
+the audio for both ThinkSpark and AssemblyAI. Denoising per-consumer would double the CPU
 cost for no gain.
 
 This matters for ThinkSpark specifically: it decides on 80 ms of audio using energy and
@@ -141,13 +141,13 @@ runs, just noisier — it degrades to a passthrough and says so at boot.
 ## Turn commit: two triggers, not one
 
 ThinkSpark decides *when* to speak — but it is not the only endpoint signal, and relying
-on it alone will hang the conversation. Soniox emits `<end>` when it detects
-end-of-utterance, and that is hard ground truth.
+on it alone will hang the conversation. AssemblyAI emits `end_of_turn` when a turn
+finalizes, and that is hard ground truth.
 
 So a turn commits on **either**:
 
 1. a smoothed `TURN_END` from ThinkSpark (fast path — fires before STT finalizes), or
-2. Soniox `<end>` while the agent is idle (fallback — guarantees the turn completes)
+2. AssemblyAI `end_of_turn` while the agent is idle (fallback — guarantees the turn completes)
 
 Whichever lands first wins; the other is a no-op because committing resets the turn
 state. This is the difference between an agent that sometimes never replies and one
@@ -157,7 +157,7 @@ that always does.
 
 ```
 22:41:02  boot           ThinkSpark ready on mps
-22:41:03  boot           Soniox STT connected
+22:41:03  boot           AssemblyAI STT connected
 22:41:03  ready          listening — Ctrl+C to stop
 22:41:07  stt            mujhe apna balance
 22:41:08  FLAG   PREFETCH_LLM     41.2 ms
@@ -193,7 +193,7 @@ agent/keys.py         API keys (gitignored)
 agent/denoise.py      RNNoise, applied once at the mic
 agent/smoothing.py    sliding-window vote + event latching
 agent/policy.py       flag -> action mapping (the interesting file)
-agent/providers.py    Soniox STT / Krutrim LLM / Sarvam TTS clients
+agent/providers.py    AssemblyAI STT / Krutrim LLM / Soniox TTS clients
 agent/live.py         mic fan-out, concurrent loops, playback
 agent/session.py      one browser connection (websocket in, TTS out)
 server.py             FastAPI websocket server + LAN URL banner
@@ -230,5 +230,5 @@ Pin a different checkpoint in `agent/config.py` (`TS_REPO` / `TS_SUBFOLDER`).
 
 Written against the verified provider catalog and the shipped `kupe` SDK, but **not yet
 run end-to-end against live audio and live provider keys**. Expect to shake out protocol
-details on first run — particularly the Soniox STT token schema and Sarvam's response
-field names. Run it, paste the traceback, and it gets fixed.
+details on first run — particularly the AssemblyAI Turn event schema and Soniox TTS
+chunk framing. Run it, paste the traceback, and it gets fixed.

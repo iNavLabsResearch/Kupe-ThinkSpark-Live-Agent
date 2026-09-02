@@ -11,8 +11,11 @@ TS_SUBFOLDER = "phase2/runs/20260902-103400/step5500"
 
 LLM_MODEL = "gemma-4-31b-it"
 LLM_BASE_URL = "https://cloud.olakrutrim.com/v1"
-STT_MODEL = "stt-rt-v5"
-STT_WS_URL = "wss://stt-rt.soniox.com/transcribe-websocket"
+
+# STT — AssemblyAI streaming v3 (PCM16le). Docs:
+# https://www.assemblyai.com/docs/streaming/getting-started/transcribe-streaming-audio
+STT_MODEL = "universal-3-5-pro"
+STT_WS_URL = "wss://streaming.assemblyai.com/v3/ws"
 
 # TTS — Soniox realtime, Mina voice
 TTS_MODEL = "tts-rt-v2"
@@ -25,7 +28,7 @@ TTS_SAMPLE_RATE = 24_000
 class Keys:
     llm: str
     stt: str
-    tts: str          # Soniox key drives both STT and TTS
+    tts: str          # Soniox TTS (Mina). STT is AssemblyAI.
     hf: str = ""
 
 
@@ -57,18 +60,18 @@ def load_keys() -> Keys:
         return os.environ.get(name) or (getattr(_k, name, "") if _k else "") or ""
 
     soniox = _get("SONIOX_API_KEY")
+    stt = _get("ASSEMBLYAI_API_KEY")
     llm = _get("KRUTRIM_API_KEY")
     hf = _get("HF_TOKEN")
     if hf:
         os.environ.setdefault("HF_TOKEN", hf)
-    if not llm or not soniox:
+    if not llm or not stt or not soniox:
         raise SystemExit(
-            "Need KRUTRIM_API_KEY and SONIOX_API_KEY. In Colab/Kaggle use a Python cell "
-            "(not !export):\n"
-            "  import os\n"
-            "  os.environ['KRUTRIM_API_KEY'] = '...'\n"
-            "  os.environ['SONIOX_API_KEY'] = '...'\n"
-            "  os.environ['HF_TOKEN'] = '...'\n"
+            "Need KRUTRIM_API_KEY, ASSEMBLYAI_API_KEY, and SONIOX_API_KEY (TTS).\n"
+            "  export ASSEMBLYAI_API_KEY='...'\n"
+            "  export KRUTRIM_API_KEY='...'\n"
+            "  export SONIOX_API_KEY='...'\n"
+            "  export HF_TOKEN='...'\n"
             "or write agent/keys.py / .env"
         )
-    return Keys(llm=llm, stt=soniox, tts=soniox, hf=hf)
+    return Keys(llm=llm, stt=stt, tts=soniox, hf=hf)
