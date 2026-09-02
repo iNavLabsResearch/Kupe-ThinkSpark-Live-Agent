@@ -13,7 +13,7 @@ are allowed to act. That mapping is the whole point of the model, so it lives in
     BARGE_SOFT    user talking over agent       -> duck TTS volume, keep speaking
     BARGE_HARD    user is interrupting          -> stop TTS now, truncate agent turn
     CONTINUE      agent may keep speaking       -> nothing
-    SILENCE_BREAK dead air                      -> emit a short filler
+    SILENCE_BREAK dead air                      -> TTS ThinkSpark spoken (or LLM reopen)
 
 The agent state fed *back* into the model matters: barge-in only means anything while
 TTS_SPEAKING. Getting this wrong silently degrades the model, so `AgentState` is the
@@ -58,9 +58,11 @@ class Policy:
         self._speculated_text: str = ""
         self._last_silence_break = 0.0
         self._last_backchannel = 0.0
+        self._model_spoken = ""
 
     # ------------------------------------------------------------------ #
-    async def handle(self, flag: str) -> Action | None:
+    async def handle(self, flag: str, spoken: str = "") -> Action | None:
+        self._model_spoken = (spoken or "").strip()
         fn = getattr(self, f"_on_{flag.lower()}", None)
         if fn is None:
             return None
@@ -216,18 +218,43 @@ class Policy:
         await self.agent.speak(text, filler=True)
         return Action("SPOKEN", text)
 
+    async def _llm_reopen(self) -> str:
+        """Guide: SILENCE_BREAK -> tts_stream(spoken or llm_reopen()).
+
+        Only used when the spoken head returned empty. One short context-aware
+        sentence — never a hardcoded filler.
+        """
+        stt = (self.agent.stt.partial or self.agent.stt.final or "").strip()
+        prompt = (
+            "The caller went silent. Re-open the conversation in one short spoken "
+            "sentence. Match their language (Hindi, English, or Gujarati). "
+            "No quotes, no stage directions."
+        )
+        if stt:
+            prompt += f" They last said: {stt}"
+        llm = self.agent.llm
+        if hasattr(llm, "one_shot"):
+            return (await llm.one_shot(prompt)).strip()
+        parts: list[str] = []
+        async for delta in llm.stream(prompt):
+            parts.append(delta)
+        return "".join(parts).strip()
+
     async def _on_silence_break(self) -> Action | None:
-        # rate-limited: the model fires this readily, and an agent that fills every
-        # gap is as bad as one that fills none
         now = time.time()
         if self.state is not AgentState.IDLE or now - self._last_silence_break < 6.0:
             return None
         if now - self._last_backchannel < 2.0:
             return None
+        text = self._model_spoken
+        if not text:
+            text = await self._llm_reopen()
+        if not text:
+            return None
         self._last_silence_break = now
         self._last_backchannel = now
-        await self.agent.speak("Mm-hmm.", filler=True)
-        return Action("SILENCE_BREAK", "played filler")
+        await self.agent.speak(text, filler=True)
+        return Action("SILENCE_BREAK", text)
 
 
 _ENDERS = ".?!\u0964"

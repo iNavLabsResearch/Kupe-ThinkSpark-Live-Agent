@@ -112,6 +112,7 @@ class FloorAgent:
         self._turn_busy = False
         self._tasks: list[asyncio.Task] = []
         self._dirty = True
+        self._spoken_latch: dict[str, str] = {}
 
     # -- context -------------------------------------------------------- #
     def _refresh_context(self) -> None:
@@ -243,17 +244,20 @@ class FloorAgent:
         spoken = (getattr(decision, "spoken", "") or "").strip()
         self.ui.frame(decision.flag, decision.latency_ms, raw=True)
         self._record(decision.flag, spoken, decision.latency_ms)
-
         if spoken:
-            asyncio.create_task(self._spoken_task(spoken))
+            self._spoken_latch[decision.flag] = spoken
+            # SILENCE_BREAK plays spoken in Policy (guide: tts_stream(spoken or llm_reopen))
+            if decision.flag != "SILENCE_BREAK":
+                asyncio.create_task(self._spoken_task(spoken))
 
         smoothed = self.smoother.push(decision.flag)
         if smoothed is None:
             return
         self.ui.frame(smoothed, decision.latency_ms, raw=False)
-        asyncio.create_task(self._policy_task(smoothed))
+        spoken_for_flag = self._spoken_latch.get(smoothed, "")
+        asyncio.create_task(self._policy_task(smoothed, spoken_for_flag))
 
-    async def _policy_task(self, flag: str) -> None:
+    async def _policy_task(self, flag: str, spoken: str = "") -> None:
         urgent = flag in {"BARGE_HARD", "BARGE_SOFT", "CANCEL_LLM"}
         idle = flag in {"LISTEN", "HOLD", "CONTINUE", "INCOMPLETE"}
         if not urgent and not idle and self._turn_busy:
@@ -261,7 +265,9 @@ class FloorAgent:
         if not urgent and not idle:
             self._turn_busy = True
         try:
-            action = await self.policy.handle(flag)
+            if flag == "SILENCE_BREAK":
+                spoken = self._spoken_latch.pop("SILENCE_BREAK", spoken)
+            action = await self.policy.handle(flag, spoken=spoken)
         except Exception as e:
             self.ui.log("error", f"policy {flag}: {e}")
             return

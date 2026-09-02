@@ -150,6 +150,26 @@ class KrutrimLLM:
                                  {"role": "assistant", "content": said}]
                 self.history = self.history[-8:]
 
+    async def one_shot(self, user_text: str) -> str:
+        """One completion that does not enter the conversation history."""
+        messages = [
+            {"role": "system", "content": self.system},
+            {"role": "user", "content": user_text},
+        ]
+        stream = await self._client.chat.completions.create(
+            model=self.model, messages=messages, stream=True,
+            temperature=0.6, max_tokens=60,
+        )
+        chunks: list[str] = []
+        async for event in stream:
+            choices = getattr(event, "choices", None) or []
+            if not choices:
+                continue
+            delta = getattr(choices[0].delta, "content", None) or ""
+            if delta:
+                chunks.append(delta)
+        return "".join(chunks)
+
 
 # --------------------------------------------------------------------------- #
 # TTS — Soniox realtime websocket, voice "Mina", streamed chunk-by-chunk
