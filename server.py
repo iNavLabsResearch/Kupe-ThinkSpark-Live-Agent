@@ -63,6 +63,15 @@ def public_ip(timeout: float = 2.0) -> str | None:
     return None
 
 
+def runpod_proxy_url(port: int) -> str | None:
+    """RunPod publishes each declared HTTP port at a proxy hostname. If we are on a pod,
+    that URL is the only thing reachable from a browser without an SSH tunnel."""
+    import os
+
+    pod_id = os.environ.get("RUNPOD_POD_ID")
+    return f"wss://{pod_id}-{port}.proxy.runpod.net/ws" if pod_id else None
+
+
 def in_container() -> bool:
     """True inside Docker. The container's own IP (172.x) is NOT reachable from a
     browser on the host, so the banner must not advertise it."""
@@ -122,6 +131,23 @@ def build_app(device: str, window: int, denoise: bool):
     def _print_banner():
         line = "=" * 66
         print(f"\n{line}\n  Kupe ThinkSpark Live Agent — ready\n{line}")
+
+        runpod = runpod_proxy_url(PORT)
+        if runpod:
+            import os
+
+            print("  RunPod detected\n")
+            print(f"  Paste this into the UI:\n\n      {runpod}\n")
+            print(f"  Requires HTTP port {PORT} to be exposed in the pod config")
+            print("  (Edit Pod -> Expose HTTP Ports -> add 8000 -> restart)\n")
+            print("  Or tunnel it instead — works immediately, no pod restart:")
+            print(f"      ssh root@<pod-ip> -p <ssh-port> -L {PORT}:localhost:{PORT}")
+            print(f"      then use  ws://localhost:{PORT}/ws")
+            print(f"\n  health:  https://{os.environ['RUNPOD_POD_ID']}-{PORT}"
+                  f".proxy.runpod.net/health")
+            print(f"  web UI:  cd web && npm install && npm run dev")
+            print(f"{line}\n")
+            return
 
         pub = public_ip()
         containerised = in_container()
