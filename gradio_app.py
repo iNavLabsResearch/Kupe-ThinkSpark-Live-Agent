@@ -66,11 +66,75 @@ def _normalize_ice(creds: dict) -> dict:
     return {"iceServers": servers, **extra}
 
 
+_ICE_CACHE: dict[int, tuple[float, dict]] = {}
+_TURN_HOST = "turn.fastrtc.org"
+
+
+def _doh_resolve(hostname: str) -> str | None:
+    """Resolve A record via DNS-over-HTTPS by IP, so broken Colab DNS still works."""
+    import httpx
+
+    probes = [
+        ("https://1.1.1.1/dns-query", {"name": hostname, "type": "A"},
+         {"accept": "application/dns-json"}),
+        ("https://8.8.8.8/resolve", {"name": hostname, "type": "A"}, {}),
+    ]
+    for url, params, headers in probes:
+        try:
+            r = httpx.get(url, params=params, headers=headers, timeout=8.0)
+            r.raise_for_status()
+            for ans in r.json().get("Answer") or []:
+                if ans.get("type") in (1, "A") and ans.get("data"):
+                    return str(ans["data"]).rstrip(".")
+        except Exception:
+            continue
+    return None
+
+
+def _dns_override(hosts: dict[str, str]):
+    import socket
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _ctx():
+        real = socket.getaddrinfo
+
+        def patched(host, port, family=0, type=0, proto=0, flags=0):
+            return real(hosts.get(host, host), port, family, type, proto, flags)
+
+        socket.getaddrinfo = patched
+        try:
+            yield
+        finally:
+            socket.getaddrinfo = real
+
+    return _ctx()
+
+
+def _fetch_turn(token: str, ttl: int) -> dict:
+    import httpx
+    from fastrtc import get_cloudflare_turn_credentials
+
+    creds = _normalize_ice(get_cloudflare_turn_credentials(hf_token=token, ttl=ttl))
+    if creds.get("iceServers"):
+        return creds
+    r = httpx.get(
+        f"https://{_TURN_HOST}/credentials",
+        headers={"Authorization": f"Bearer {token}"},
+        params={"ttl": str(ttl)},
+        timeout=25.0,
+    )
+    r.raise_for_status()
+    return _normalize_ice(r.json())
+
+
 def _rtc_config(ttl: int = 600):
     """ICE servers for Colab/Kaggle NAT. Empty dict = Connection failed."""
     import time
 
-    import httpx
+    cached = _ICE_CACHE.get(ttl)
+    if cached and cached[0] > time.time():
+        return cached[1]
 
     token = _hf_token().strip()
     if token:
@@ -79,35 +143,31 @@ def _rtc_config(ttl: int = 600):
     errors = []
     if token:
         try:
-            from fastrtc import get_cloudflare_turn_credentials
-            creds = _normalize_ice(
-                get_cloudflare_turn_credentials(hf_token=token, ttl=ttl)
-            )
-            n = len(creds["iceServers"])
+            creds = _fetch_turn(token, ttl)
+            n = len(creds.get("iceServers") or [])
             if n:
                 print(f"==> TURN ready  ({n} iceServers, ttl={ttl})")
+                _ICE_CACHE[ttl] = (time.time() + max(30, ttl * 0.8), creds)
                 return creds
             errors.append("cloudflare helper returned no iceServers")
         except Exception as e:
-            errors.append(f"fastrtc helper: {e}")
+            errors.append(f"system DNS: {e}")
 
-        for i in range(3):
+        ip = _doh_resolve(_TURN_HOST)
+        if ip:
             try:
-                r = httpx.get(
-                    "https://turn.fastrtc.org/credentials",
-                    headers={"Authorization": f"Bearer {token}"},
-                    params={"ttl": str(ttl)},
-                    timeout=25.0,
-                )
-                r.raise_for_status()
-                creds = _normalize_ice(r.json())
-                n = len(creds["iceServers"])
+                with _dns_override({_TURN_HOST: ip}):
+                    creds = _fetch_turn(token, ttl)
+                n = len(creds.get("iceServers") or [])
                 if n:
-                    print(f"==> TURN ready via httpx  ({n} iceServers, ttl={ttl})")
+                    print(f"==> TURN ready via DoH  ({n} iceServers, {ip}, ttl={ttl})")
+                    _ICE_CACHE[ttl] = (time.time() + max(30, ttl * 0.8), creds)
                     return creds
+                errors.append("DoH fetch returned no iceServers")
             except Exception as e:
-                errors.append(f"httpx {i+1}: {e}")
-                time.sleep(1.2)
+                errors.append(f"DoH {ip}: {e}")
+        else:
+            errors.append("DoH could not resolve " + _TURN_HOST)
 
     print("==> TURN failed: " + " | ".join(errors[:4]))
     return {
