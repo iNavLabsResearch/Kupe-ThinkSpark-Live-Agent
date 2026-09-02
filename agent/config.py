@@ -30,18 +30,11 @@ class Keys:
 
 
 def load_thinkspark(device: str = "auto"):
-    """Load ThinkSpark. Pod kupe 0.2.x has no subfolder= — needs git main (0.3)."""
-    import inspect
-
+    """Load ThinkSpark after proving kupe + transformers can actually import Mimi."""
+    from agent.preflight import check
     from kupe import ThinkSpark
 
-    params = inspect.signature(ThinkSpark.__init__).parameters
-    if "subfolder" not in params:
-        raise SystemExit(
-            "kupe is too old (no subfolder=). On the pod run:\n"
-            "  pip install -U 'kupe[thinkspark] @ git+https://github.com/kupe-ai/kupe-sdk.git@main'\n"
-            "  python server.py"
-        )
+    check()
     return ThinkSpark(TS_REPO, device=device, subfolder=TS_SUBFOLDER)
 
 

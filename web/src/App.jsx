@@ -19,8 +19,9 @@ const MIC_RATE = 24000;
 export default function App() {
   const [url, setUrl] = useState(() => {
     const saved = localStorage.getItem("kupe_ws_url") || "";
-    // RunPod's HTTPS proxy does not upgrade WebSockets. SSH tunnel = localhost.
-    if (saved.includes("proxy.runpod.net") || saved.startsWith("wss://")) {
+    // RunPod's HTTPS proxy usually cannot upgrade WebSockets. Keep other wss://
+    // (nginx TLS, Cloudflare, Vast direct IP, etc.).
+    if (saved.includes("proxy.runpod.net")) {
       localStorage.removeItem("kupe_ws_url");
       return "ws://127.0.0.1:8000/ws";
     }
@@ -150,7 +151,7 @@ export default function App() {
           <input
             value={url}
             onChange={(e) => setUrl(e.target.value)}
-            placeholder="ws://192.168.x.x:8000/ws"
+            placeholder="ws://HOST:8000/ws"
             disabled={status === "connected"}
           />
           {status === "connected" ? (

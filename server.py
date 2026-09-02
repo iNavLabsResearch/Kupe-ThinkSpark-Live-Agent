@@ -21,11 +21,8 @@ The model loads once at startup and is shared by every connection.
 from __future__ import annotations
 
 import argparse
-import asyncio
-import json
 import socket
-
-import numpy as np
+from contextlib import asynccontextmanager
 
 from agent import config
 from agent.config import load_keys
@@ -92,19 +89,19 @@ def build_app(device: str, window: int, denoise: bool):
 
     from agent.session import WebSession
 
-    app = FastAPI(title="Kupe ThinkSpark Live Agent")
-    # deliberately wide open — this is a local dev/demo server
-    app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"],
-                       allow_headers=["*"])
-
     state = {"referee": None}
 
-    @app.on_event("startup")
-    async def _load():
+    @asynccontextmanager
+    async def lifespan(app):
         print(f"loading ThinkSpark on device={device} ...")
         state["referee"] = config.load_thinkspark(device)
         print(f"ThinkSpark ready on {state['referee'].device}")
         _print_banner()
+        yield
+
+    app = FastAPI(title="Kupe ThinkSpark Live Agent", lifespan=lifespan)
+    app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"],
+                       allow_headers=["*"])
 
     @app.get("/health")
     async def health():
@@ -130,46 +127,34 @@ def build_app(device: str, window: int, denoise: bool):
         line = "=" * 66
         print(f"\n{line}\n  Kupe ThinkSpark Live Agent — ready\n{line}")
 
-        runpod = runpod_proxy_url(PORT)
-        if runpod:
-            import os
-
-            print("  RunPod detected\n")
-            print(f"  Paste this into the UI:\n\n      {runpod}\n")
-            print(f"  Requires HTTP port {PORT} to be exposed in the pod config")
-            print("  (Edit Pod -> Expose HTTP Ports -> add 8000 -> restart)\n")
-            print("  Or tunnel it instead — works immediately, no pod restart:")
-            print(f"      ssh root@<pod-ip> -p <ssh-port> -L {PORT}:localhost:{PORT}")
-            print(f"      then use  ws://localhost:{PORT}/ws")
-            print(f"\n  health:  https://{os.environ['RUNPOD_POD_ID']}-{PORT}"
-                  f".proxy.runpod.net/health")
-            print(f"  web UI:  cd web && npm install && npm run dev")
-            print(f"{line}\n")
-            return
-
         pub = public_ip()
+        runpod = runpod_proxy_url(PORT)
         containerised = in_container()
 
+        print("  Paste ONE of these into the UI — whichever your host actually routes.\n")
         if pub:
-            print(f"  Paste this into the UI:\n\n      ws://{pub}:{PORT}/ws\n")
-        else:
-            print(f"  Paste this into the UI:\n\n      ws://localhost:{PORT}/ws\n")
-
-        if containerised:
-            # 172.x is the container's private address — unreachable from a browser.
-            print(f"  same machine:  ws://localhost:{PORT}/ws")
-            print(f"  (container needs  -p {PORT}:{PORT}  for either to work)")
-        else:
-            print(f"  LAN:           ws://{lan_ip()}:{PORT}/ws")
-            print(f"  same machine:  ws://127.0.0.1:{PORT}/ws")
-
+            print(f"  direct IP (Vast / open port / nginx on {PORT}):")
+            print(f"      ws://{pub}:{PORT}/ws")
+            print(f"  nginx on port 80 (./expose.sh):")
+            print(f"      ws://{pub}/ws")
+        print(f"  same machine:")
+        print(f"      ws://127.0.0.1:{PORT}/ws")
+        if not containerised:
+            print(f"  LAN:")
+            print(f"      ws://{lan_ip()}:{PORT}/ws")
+        print()
+        print("  Tunnel is optional. Only if the provider blocks inbound ports:")
+        print(f"      ssh ... -N -L {PORT}:localhost:{PORT}   then  ws://127.0.0.1:{PORT}/ws")
+        print("      ./tunnel.sh quick                         then  wss://<cloudflare>/ws")
+        if runpod:
+            print(f"  RunPod HTTP proxy (often no WebSocket upgrade):")
+            print(f"      {runpod}")
+        print()
         if pub:
-            print(f"  health:        http://{pub}:{PORT}/health")
-            print(f"\n  NOTE: the public URL only works if port {PORT} is open in your")
-            print("        provider's firewall / security group. No auth on this server.")
+            print(f"  health:  http://{pub}:{PORT}/health")
+            print(f"           (fails = port not published — open it or use a tunnel)")
         else:
-            print(f"  health:        http://localhost:{PORT}/health")
-
+            print(f"  health:  http://localhost:{PORT}/health")
         print(f"  web UI:  cd web && npm install && npm run dev")
         print(f"{line}\n")
 
@@ -193,7 +178,8 @@ def main() -> None:
     import uvicorn
 
     app = build_app(args.device, args.window, not args.no_denoise)
-    uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
+    uvicorn.run(app, host=args.host, port=args.port, log_level="warning",
+                proxy_headers=True, forwarded_allow_ips="*")
 
 
 if __name__ == "__main__":

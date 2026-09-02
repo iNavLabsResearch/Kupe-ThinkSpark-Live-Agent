@@ -45,9 +45,9 @@ cat <<'MSG'
 
 setup complete.
 
-  source .venv/bin/activate
-  python server.py          # websocket server + LAN URL for the web UI
-  python main.py            # terminal-only agent
+  ./start.sh                # venv + deps + preflight + server (use this)
+  ./start.sh --tmux         # same, detached on the pod
 
-  cd web && npm install && npm run dev     # the browser UI
+  python main.py            # terminal-only agent
+  cd web && npm install && npm run dev
 MSG

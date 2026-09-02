@@ -1,12 +1,16 @@
-# from git until 0.3.0 is on PyPI — 0.2.x lacks subfolder= and still fetches gated Gemma
+# Pin the audio stack here so a stale system transformers cannot boot-fail.
+# kupe 0.2.x has no subfolder=; 0.3 lives on git until it is on PyPI.
 kupe[thinkspark] @ git+https://github.com/kupe-ai/kupe-sdk.git@main
+transformers>=4.49,<5
+accelerate>=0.34
+huggingface_hub>=0.24
 sounddevice>=0.4
 websockets>=12.0
 openai>=1.40
 httpx>=0.27
 rich>=13.0
 numpy>=1.24
-pyrnnoise>=0.1              # RNNoise denoising (optional; passthrough if absent)
+pyrnnoise>=0.1
 fastapi>=0.110
 uvicorn[standard]>=0.29
 python-dotenv>=1.0

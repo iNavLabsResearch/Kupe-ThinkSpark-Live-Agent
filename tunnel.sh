@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
-# Expose the agent at a real domain (default: thinkspark.kupe.in) via Cloudflare Tunnel.
+# Optional Cloudflare Tunnel. Skip this if the host already publishes a port
+# (Vast.ai, colo, local GPU) — use the public IP or ./expose.sh instead.
 #
-# Why a tunnel and not nginx: on RunPod (and most rented GPU hosts) inbound port 8000
-# is never routed to your container, so no web server or DNS A record can help — the
-# packets do not reach you. A tunnel dials OUT to Cloudflare, so nothing needs opening.
+# Only needed when inbound 8000 never reaches the container (typical RunPod).
 #
 #   ./tunnel.sh quick     one-off trycloudflare.com URL, zero setup, no account
 #   ./tunnel.sh setup     bind thinkspark.kupe.in permanently (needs a CF account)

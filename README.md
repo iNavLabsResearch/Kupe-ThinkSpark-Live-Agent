@@ -201,31 +201,35 @@ web/                  React UI — paste the URL, talk
 .env.example          key template
 ```
 
-## Public URL (thinkspark.kupe.in)
+## Reachability (tunnel is optional)
 
-On RunPod and most rented GPU hosts, inbound port 8000 is **never routed to your
-container** — so nginx, a reverse proxy, or a DNS A record cannot help. The packets do
-not reach the box. A tunnel dials *out* instead, so nothing has to be opened.
+The server binds `0.0.0.0:8000`. Use the path your host actually routes.
+
+**Direct IP** — Vast.ai, a colo, a local GPU box, anything that publishes a port:
+
+```
+ws://<public-ip>:8000/ws
+```
+
+Open 8000 (or the mapped host port) in the provider panel. No tunnel.
+
+**nginx on port 80** — same hosts, nicer URL:
 
 ```bash
-./tunnel.sh quick     # throwaway https URL in ~10s, no account needed
-./tunnel.sh setup     # bind thinkspark.kupe.in permanently (Cloudflare account)
-./tunnel.sh run       # run the configured tunnel
+./expose.sh                 # :80 -> :8000, WebSocket upgrade on
+# UI:  ws://<public-ip>/ws
 ```
 
-`setup` creates the DNS record for you via the Cloudflare API — you do **not** add an
-A record by hand. It writes a CNAME to `<tunnel-id>.cfargotunnel.com`, which is the only
-form that works (a CNAME to RunPod's own proxy fails, because that proxy routes on its
-own hostname and will not match `thinkspark.kupe.in`).
+**Tunnel** — only when inbound ports never reach the container (typical RunPod):
 
-Then connect the UI to:
-
-```
-wss://thinkspark.kupe.in/ws
+```bash
+ssh ... -N -L 8000:localhost:8000          # then ws://127.0.0.1:8000/ws
+./tunnel.sh quick                          # throwaway wss://…trycloudflare.com/ws
+./tunnel.sh setup && ./tunnel.sh run       # optional: wss://thinkspark.kupe.in/ws
 ```
 
-Note `wss://`, not `ws://` — the tunnel terminates TLS, and a browser on an https page
-refuses plaintext websockets.
+`wss://` is required on HTTPS pages. The RunPod `*.proxy.runpod.net` hostname often
+does not upgrade WebSockets — prefer direct IP, nginx, or a tunnel instead.
 
 ## Model weights
 

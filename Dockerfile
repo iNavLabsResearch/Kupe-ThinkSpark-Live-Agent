@@ -20,7 +20,8 @@ WORKDIR /app
 RUN pip install "torch>=2.5,<3" --index-url https://download.pytorch.org/whl/cu124
 
 COPY requirements.txt .
-RUN pip install -r requirements.txt
+RUN pip install -r requirements.txt \
+ && pip install -U "transformers>=4.49,<5" "accelerate>=0.34"
 
 COPY . .
 
