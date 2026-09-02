@@ -44,7 +44,7 @@ echo "==> deps"
 $PY -m pip install -q -r requirements.txt
 
 if [[ "$MODE" == "gradio" ]]; then
-  $PY -m pip install -q "gradio>=4.44,<6" "fastrtc>=0.0.19" "huggingface_hub>=0.34,<1"
+  $PY -m pip install -q "gradio>=4.44,<6" "fastrtc[vad]>=0.0.19" "huggingface_hub>=0.34,<1" onnxruntime
   echo "==> Gradio voice UI — no ngrok. Use the *.gradio.live link."
   exec $PY gradio_app.py
 fi

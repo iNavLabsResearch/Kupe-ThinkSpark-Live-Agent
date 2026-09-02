@@ -105,14 +105,19 @@ def _in_colab_or_kaggle() -> bool:
 
 
 def _rtc_config():
-    token = os.environ.get("HF_TOKEN") or ""
+    try:
+        from fastrtc import get_cloudflare_turn_credentials
+        return get_cloudflare_turn_credentials()
+    except Exception as e:
+        print(f"==> cloudflare TURN failed ({e})")
     try:
         from fastrtc import get_hf_turn_credentials
+        token = os.environ.get("HF_TOKEN") or ""
         if token:
             os.environ.setdefault("HF_TOKEN", token)
         return get_hf_turn_credentials()
     except Exception as e:
-        print(f"==> TURN creds skipped ({e}) — WebRTC may fail behind NAT")
+        print(f"==> HF TURN skipped ({e}) — WebRTC may fail behind NAT")
         return None
 
 
@@ -139,7 +144,7 @@ def main() -> None:
         yield AdditionalOutputs(user, reply, flag)
 
     rtc = _rtc_config()
-    with gr.Blocks(title="Kupe ThinkSpark", css=CSS, theme=gr.themes.Soft()) as demo:
+    with gr.Blocks(title="Kupe ThinkSpark") as demo:
         gr.Markdown(
             "# Kupe ThinkSpark\n"
             "Click the **orb**, grant the mic, **talk**. "
@@ -183,11 +188,18 @@ def main() -> None:
         server_name="0.0.0.0",
         server_port=int(os.environ.get("GRADIO_PORT", "7860")),
         share=True,
+        css=CSS,
+        theme=gr.themes.Soft(),
     )
     try:
         demo.launch(inline=_in_colab_or_kaggle(), ssr_mode=False, **launch_kw)
     except TypeError:
-        demo.launch(**launch_kw)
+        launch_kw.pop("css", None)
+        launch_kw.pop("theme", None)
+        try:
+            demo.launch(**launch_kw)
+        except TypeError:
+            demo.launch(server_name="0.0.0.0", share=True)
 
 
 if __name__ == "__main__":
