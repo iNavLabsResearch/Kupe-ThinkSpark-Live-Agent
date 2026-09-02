@@ -26,6 +26,9 @@ STT_RATE = 16_000
 FRAME_MS = 80
 FRAME_SAMPLES = MIC_RATE * FRAME_MS // 1000
 TABLE_MAX = 80
+# float32 RMS; silence / fan noise sits well below this, speech is above
+USER_SPEECH_RMS = 0.012
+TTS_ECHO_S = 0.4
 
 
 def _f32_to_pcm16(x: np.ndarray) -> bytes:
@@ -114,6 +117,8 @@ class FloorAgent:
         self._dirty = True
         self._spoken_latch: dict[str, str] = {}
         self._spoken_claimed = False
+        self._last_rms = 0.0
+        self._tts_echo_until = 0.0
 
     # -- context -------------------------------------------------------- #
     def _refresh_context(self) -> None:
@@ -183,6 +188,7 @@ class FloorAgent:
         except Exception as e:
             self.ui.log("error", f"tts failed: {e}")
         self._speaking = False
+        self._tts_echo_until = time.time() + TTS_ECHO_S
         self.agent_text = ""
         self.policy.state = AgentState.TTS_DONE if not filler else AgentState.IDLE
         self._refresh_context()
@@ -214,11 +220,14 @@ class FloorAgent:
 
     def _step_chunk(self, chunk: np.ndarray) -> list:
         chunk = self.denoiser(chunk)
+        self._last_rms = float(np.sqrt(np.mean(chunk.astype(np.float64) ** 2) + 1e-12))
         pcm = _f32_to_pcm16(_resample(chunk, MIC_RATE, STT_RATE))
         try:
             self._stt_q.put_nowait(pcm)
         except queue.Full:
             pass
+        # Model never trained on agent audio. While we are playing TTS, still run
+        # ThinkSpark on the mic (barge-in) but spoken playback is gated separately.
         return list(self.referee.stream(
             source=[chunk],
             sample_rate=MIC_RATE,
@@ -245,12 +254,27 @@ class FloorAgent:
             return False
         if self.policy.state is AgentState.TTS_SPEAKING:
             return False
+        if time.time() < self._tts_echo_until:
+            return False
         now = time.time()
         if now - self.policy._last_backchannel < 2.0:
             return False
         self._spoken_claimed = True
         self.policy._last_backchannel = now
         return True
+
+    def _user_is_talking(self) -> bool:
+        """Back-channel (B2) while the user is speaking — do not wait for STT.
+
+        ThinkSpark is ~80 ms; Soniox partials lag. Energy is the live 'user talking'
+        bit. STT is a second vote once tokens exist. Silence has low RMS so LISTEN
+        + 'I see' does not TTS.
+        """
+        if time.time() < self._tts_echo_until:
+            return False
+        if self._last_rms >= USER_SPEECH_RMS:
+            return True
+        return bool(self._stt_str())
 
     def _should_play_spoken(self, flag: str, spoken: str) -> bool:
         """Guide: LISTEN is pass; spoken TTS only for real back-channel / thinking."""
@@ -260,7 +284,7 @@ class FloorAgent:
             return False
         if flag == "INCOMPLETE":
             return True
-        if flag == "LISTEN" and self._stt_str():
+        if flag == "LISTEN" and self._user_is_talking():
             return True
         return False
 
@@ -268,7 +292,11 @@ class FloorAgent:
         self.frames += 1
         self.decode_ms.append(decision.latency_ms)
         spoken = (getattr(decision, "spoken", "") or "").strip()
-        speaking = self._speaking or self.policy.state is AgentState.TTS_SPEAKING
+        speaking = (
+            self._speaking
+            or self.policy.state is AgentState.TTS_SPEAKING
+            or time.time() < self._tts_echo_until
+        )
         playable = (not speaking) and (
             decision.flag == "SILENCE_BREAK"
             or self._should_play_spoken(decision.flag, spoken)

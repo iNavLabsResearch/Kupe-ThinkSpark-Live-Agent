@@ -205,16 +205,14 @@ class Policy:
 
     # --- dead air ------------------------------------------------------- #
     async def on_spoken(self, text: str, flag: str = "") -> Action | None:
-        """Spoken-head back-channel. LISTEN requires STT (B2); INCOMPLETE is thinking (B6)."""
+        """Spoken-head back-channel. LISTEN = user talking (energy or STT). INCOMPLETE = thinking."""
         text = (text or "").strip()
         if not text or self.state is not AgentState.IDLE:
             return None
         if getattr(self.agent, "_speaking", False):
             return None
-        if flag == "LISTEN":
-            stt = (self.agent.stt.partial or self.agent.stt.final or "").strip()
-            if not stt:
-                return None
+        if flag == "LISTEN" and not self.agent._user_is_talking():
+            return None
         await self.agent.speak(text, filler=True)
         return Action("SPOKEN", text)
 
