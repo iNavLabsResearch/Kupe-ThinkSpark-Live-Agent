@@ -49,7 +49,7 @@ if [[ "$MODE" == "gradio" ]]; then
   exec $PY gradio_app.py
 fi
 
-$PY -m pip install -q -U "transformers>=4.49,<5" "accelerate>=0.34" "huggingface_hub>=0.24" pyngrok
+$PY -m pip install -q -U "transformers>=4.49,<5" "accelerate>=0.34" "huggingface_hub>=0.34,<1" pyngrok
 echo "==> preflight"
 $PY -c "from agent.preflight import check; check()"
 echo "==> FastAPI + ngrok"

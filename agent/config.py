@@ -1,4 +1,4 @@
-"""Provider config. Keys come from agent/keys.py (gitignored), env vars override."""
+"""Provider config. Keys come from agent/keys.py (gitignored), .env, or env vars."""
 
 from __future__ import annotations
 
@@ -35,7 +35,10 @@ def load_thinkspark(device: str = "auto"):
     from kupe import ThinkSpark
 
     check()
-    return ThinkSpark(TS_REPO, device=device, subfolder=TS_SUBFOLDER)
+    keys = load_keys()
+    if keys.hf:
+        os.environ.setdefault("HF_TOKEN", keys.hf)
+    return ThinkSpark(TS_REPO, device=device, subfolder=TS_SUBFOLDER, hf_token=keys.hf or None)
 
 
 def load_keys() -> Keys:
@@ -55,9 +58,17 @@ def load_keys() -> Keys:
 
     soniox = _get("SONIOX_API_KEY")
     llm = _get("KRUTRIM_API_KEY")
+    hf = _get("HF_TOKEN")
+    if hf:
+        os.environ.setdefault("HF_TOKEN", hf)
     if not llm or not soniox:
         raise SystemExit(
-            "Need KRUTRIM_API_KEY and SONIOX_API_KEY in .env / the environment "
-            "(or in agent/keys.py)."
+            "Need KRUTRIM_API_KEY and SONIOX_API_KEY. In Colab/Kaggle use a Python cell "
+            "(not !export):\n"
+            "  import os\n"
+            "  os.environ['KRUTRIM_API_KEY'] = '...'\n"
+            "  os.environ['SONIOX_API_KEY'] = '...'\n"
+            "  os.environ['HF_TOKEN'] = '...'\n"
+            "or write agent/keys.py / .env"
         )
-    return Keys(llm=llm, stt=soniox, tts=soniox, hf=_get("HF_TOKEN"))
+    return Keys(llm=llm, stt=soniox, tts=soniox, hf=hf)
