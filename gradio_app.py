@@ -114,7 +114,13 @@ def _hf_token() -> str:
         return os.environ.get("HF_TOKEN", "") or ""
 
 
-def _rtc_config():
+def _normalize_ice(creds: dict) -> dict:
+    servers = creds.get("iceServers") or creds.get("ice_servers") or []
+    extra = {k: v for k, v in creds.items() if k not in ("iceServers", "ice_servers")}
+    return {"iceServers": servers, **extra}
+
+
+def _rtc_config(ttl: int = 600):
     """ICE servers for Colab/Kaggle NAT. Empty dict = Connection failed."""
     import time
 
@@ -128,10 +134,12 @@ def _rtc_config():
     if token:
         try:
             from fastrtc import get_cloudflare_turn_credentials
-            creds = get_cloudflare_turn_credentials(hf_token=token, ttl=600)
-            n = len(creds.get("iceServers") or creds.get("ice_servers") or [])
+            creds = _normalize_ice(
+                get_cloudflare_turn_credentials(hf_token=token, ttl=ttl)
+            )
+            n = len(creds["iceServers"])
             if n:
-                print(f"==> TURN ready  ({n} iceServers)")
+                print(f"==> TURN ready  ({n} iceServers, ttl={ttl})")
                 return creds
             errors.append("cloudflare helper returned no iceServers")
         except Exception as e:
@@ -142,14 +150,14 @@ def _rtc_config():
                 r = httpx.get(
                     "https://turn.fastrtc.org/credentials",
                     headers={"Authorization": f"Bearer {token}"},
-                    params={"ttl": "600"},
+                    params={"ttl": str(ttl)},
                     timeout=25.0,
                 )
                 r.raise_for_status()
-                creds = r.json()
-                n = len(creds.get("iceServers") or creds.get("ice_servers") or [])
+                creds = _normalize_ice(r.json())
+                n = len(creds["iceServers"])
                 if n:
-                    print(f"==> TURN ready via httpx  ({n} iceServers)")
+                    print(f"==> TURN ready via httpx  ({n} iceServers, ttl={ttl})")
                     return creds
             except Exception as e:
                 errors.append(f"httpx {i+1}: {e}")
@@ -188,7 +196,7 @@ def main() -> None:
         yield AdditionalOutputs(user, reply, flag)
 
     def ice():
-        return _rtc_config()
+        return _rtc_config(ttl=600)
 
     with gr.Blocks(title="Kupe ThinkSpark") as demo:
         gr.Markdown(
@@ -205,14 +213,17 @@ def main() -> None:
             mode="send-receive",
             elem_id="orb",
         )
+        # rtc_configuration may be a callable; server_rtc_configuration must be a dict
+        # (FastRTC convert_to_aiortc_format does rtc_config.get("iceServers")).
+        server_ice = _rtc_config(ttl=360_000)
         try:
             webrtc = WebRTC(
                 rtc_configuration=ice,
-                server_rtc_configuration=ice,
+                server_rtc_configuration=server_ice,
                 **rtc_kw,
             )
         except TypeError:
-            webrtc = WebRTC(rtc_configuration=ice(), **rtc_kw)
+            webrtc = WebRTC(rtc_configuration=server_ice, **rtc_kw)
         stream_fn = ReplyOnPause(on_pause)
         try:
             stream_fn = ReplyOnPause(
