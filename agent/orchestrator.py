@@ -27,6 +27,23 @@ STT_RATE = 16_000
 FRAME_MS = 80
 FRAME_SAMPLES = MIC_RATE * FRAME_MS // 1000
 TABLE_MAX = 80
+TTS_RATE = config.TTS_SAMPLE_RATE
+
+# Placeholder / back-channel strings that must never be treated as the user's turn.
+_JUNK_STT = frozenset({
+    "please wait", "please wait.", "pls wait",
+    "i see", "i see.", "i see...",
+    "mm-hmm", "mm hmm", "mhm", "uh huh", "uh-huh", "uh-huh.",
+})
+
+
+def _norm_utt(text: str) -> str:
+    return " ".join((text or "").lower().strip().strip(".!?,;:").split())
+
+
+def _is_junk_stt(text: str) -> bool:
+    n = _norm_utt(text)
+    return (not n) or n in _JUNK_STT or n.startswith("please wait")
 
 
 def _f32_to_pcm16(x: np.ndarray) -> bytes:
@@ -116,12 +133,17 @@ class FloorAgent:
         self._spoken_latch: dict[str, str] = {}
         self._spoken_claimed = False
         self._echo_until = 0.0
+        self._play_until = 0.0
+        self._last_tts_text = ""
+        self._user_partial = ""
+        self._user_final = ""
+        self._stt_status = "connecting"
 
     # -- context -------------------------------------------------------- #
     def _refresh_context(self) -> None:
         self.referee.set_context(
             agent_text=self.agent_text,
-            stt_partial=self.stt.partial or self.stt.final,
+            stt_partial=self._user_partial or self._user_final,
         )
 
     def _context_str(self) -> str:
@@ -132,7 +154,18 @@ class FloorAgent:
         return state
 
     def _stt_str(self) -> str:
-        return (self.stt.partial or self.stt.final or "").strip()
+        return (self._user_partial or self._user_final or "").strip()
+
+    def _looks_like_echo(self, text: str) -> bool:
+        n = _norm_utt(text)
+        if not n:
+            return True
+        if n in _JUNK_STT or n.startswith("please wait"):
+            return True
+        last = _norm_utt(self._last_tts_text)
+        if last and (n == last or n in last or last in n):
+            return True
+        return False
 
     # -- audio out ------------------------------------------------------ #
     def duck(self) -> None:
@@ -141,6 +174,8 @@ class FloorAgent:
     def stop_speaking(self) -> None:
         self._stop_playback.set()
         self._speaking = False
+        self._play_until = 0.0
+        self._echo_until = time.time() + 0.25
         self._volume = 1.0
         while True:
             try:
@@ -152,6 +187,9 @@ class FloorAgent:
         a = np.frombuffer(pcm, dtype=np.int16)
         if self._volume != 1.0:
             a = (a.astype(np.float32) * self._volume).astype(np.int16)
+        now = time.time()
+        start = max(now, self._play_until)
+        self._play_until = start + (len(a) / float(TTS_RATE))
         try:
             self.playback_q.put_nowait(a)
         except queue.Full:
@@ -172,6 +210,7 @@ class FloorAgent:
         self._stop_playback.clear()
         self._volume = 1.0
         self.agent_text = text
+        self._last_tts_text = text
         self._refresh_context()
         self.ui.log("tts", f"speaking: {text!r}")
         self.last_output = f"TTS: {text}"
@@ -185,7 +224,11 @@ class FloorAgent:
         except Exception as e:
             self.ui.log("error", f"tts failed: {e}")
         self._speaking = False
-        self._echo_until = time.time() + 0.60
+        # TTS bytes arrive faster than realtime — keep the floor until speakers finish.
+        wait = max(0.0, self._play_until - time.time())
+        if wait and not self._stop_playback.is_set() and not self._closed:
+            await asyncio.sleep(wait)
+        self._echo_until = time.time() + 0.40
         self.agent_text = ""
         self.policy.state = AgentState.TTS_DONE if not filler else AgentState.IDLE
         self._refresh_context()
@@ -216,12 +259,32 @@ class FloorAgent:
                     pass
 
     def _echo_active(self) -> bool:
-        """TTS (and a short hangover) must not land in STT. ThinkSpark still hears the mic."""
+        """Mute STT while audio is actually coming out of the speakers, not just while
+        the TTS websocket is open. Generation finishes in ~200 ms; playback lasts seconds."""
+        now = time.time()
         return (
             self._speaking
             or self.policy.state is AgentState.TTS_SPEAKING
-            or time.time() < self._echo_until
+            or now < self._play_until
+            or now < self._echo_until
         )
+
+    def _accept_stt(self, text: str, is_final: bool) -> bool:
+        """Keep ThinkSpark / the table on the user's words, never the agent's."""
+        text = (text or "").strip()
+        if not text or self._echo_active() or self._looks_like_echo(text):
+            self.stt.partial = self._user_partial
+            self.stt.final = self._user_final
+            return False
+        self._user_partial = text
+        self.stt.partial = text
+        if is_final:
+            self._user_final = text
+            self.stt.final = text
+        self._refresh_context()
+        self._stt_status = "live"
+        self._dirty = True
+        return True
 
     def _step_chunk(self, chunk: np.ndarray) -> list:
         chunk = self.denoiser(chunk)
@@ -232,10 +295,15 @@ class FloorAgent:
             self._stt_q.put_nowait(pcm)
         except queue.Full:
             pass
+        # Referee must see the current STT every frame (not only on Turn events).
+        self._refresh_context()
+        state = self.policy.state.value
+        if self._echo_active() and state == AgentState.IDLE.value:
+            state = AgentState.TTS_SPEAKING.value
         return list(self.referee.stream(
             source=[chunk],
             sample_rate=MIC_RATE,
-            agent_state=self.policy.state.value,
+            agent_state=state,
         ))
 
     def _record(self, flag: str, spoken: str, ms: float, output: str = "") -> FrameRow:
@@ -254,9 +322,7 @@ class FloorAgent:
 
     def _claim_backchannel(self) -> bool:
         """Sync latch so LISTEN frames cannot queue parallel spoken TTS."""
-        if self._speaking or self._spoken_claimed:
-            return False
-        if self.policy.state is AgentState.TTS_SPEAKING:
+        if self._speaking or self._spoken_claimed or self._echo_active():
             return False
         now = time.time()
         if now - self.policy._last_backchannel < 2.0:
@@ -266,24 +332,22 @@ class FloorAgent:
         return True
 
     def _should_play_spoken(self, flag: str, spoken: str) -> bool:
-        """Guide: LISTEN is pass; spoken TTS only for real back-channel / thinking."""
-        if not spoken:
+        """LISTEN = user has the floor (stay silent). Spoken TTS only while thinking."""
+        if not spoken or _is_junk_stt(spoken):
             return False
-        if self._speaking or self.policy.state is AgentState.TTS_SPEAKING:
+        if self._echo_active():
             return False
-        if flag == "INCOMPLETE":
-            return True
-        if flag == "LISTEN" and self._stt_str():
-            return True
-        return False
+        if flag != "INCOMPLETE":
+            return False
+        return bool(self._stt_str()) and not _is_junk_stt(self._stt_str())
 
     async def _on_decision(self, decision) -> None:
         self.frames += 1
         self.decode_ms.append(decision.latency_ms)
         spoken = (getattr(decision, "spoken", "") or "").strip()
-        speaking = self._speaking or self.policy.state is AgentState.TTS_SPEAKING
+        speaking = self._echo_active()
         playable = (not speaking) and (
-            decision.flag == "SILENCE_BREAK"
+            (decision.flag == "SILENCE_BREAK" and not _is_junk_stt(spoken))
             or self._should_play_spoken(decision.flag, spoken)
         )
         self.ui.frame(decision.flag, decision.latency_ms, raw=True)
@@ -291,7 +355,7 @@ class FloorAgent:
 
         if speaking:
             spoken = ""
-        elif spoken:
+        elif spoken and not _is_junk_stt(spoken):
             self._spoken_latch[decision.flag] = spoken
             if decision.flag != "SILENCE_BREAK" and playable and self._claim_backchannel():
                 asyncio.create_task(self._spoken_task(spoken, decision.flag))
@@ -365,37 +429,58 @@ class FloorAgent:
                 self.ui.log("error", f"stt send: {e}")
 
     async def _stt_recv_loop(self) -> None:
-        try:
-            async for text, is_final in self.stt.transcripts():
+        while not self._closed:
+            try:
+                async for text, is_final in self.stt.transcripts():
+                    if self._closed:
+                        return
+                    if not self._accept_stt(text, is_final):
+                        continue
+                    kind = "stt-final" if is_final else "stt"
+                    self.ui.log(kind, text)
+                    if is_final and not _is_junk_stt(text):
+                        if self._turn_busy:
+                            continue
+                        self._turn_busy = True
+                        try:
+                            action = await self.policy.commit_from_stt()
+                        finally:
+                            self._turn_busy = False
+                        if action:
+                            self._note_action(action)
                 if self._closed:
                     return
-                if self._echo_active():
-                    continue
-                self._refresh_context()
-                self._dirty = True
-                kind = "stt-final" if is_final else "stt"
-                self.ui.log(kind, text)
-                if is_final:
-                    if self._turn_busy:
-                        continue
-                    self._turn_busy = True
-                    try:
-                        action = await self.policy.commit_from_stt()
-                    finally:
-                        self._turn_busy = False
-                    if action:
-                        self._note_action(action)
-        except Exception as e:
-            if not self._closed:
+            except Exception as e:
+                if self._closed:
+                    return
+                self._stt_status = f"error: {e}"
                 self.ui.log("error", f"stt recv: {e}")
+            await asyncio.sleep(0.8)
+            if self._closed:
+                return
+            try:
+                await self.stt.close()
+                await self.stt.connect()
+                self._stt_status = "reconnected"
+                self.ui.log("boot", "AssemblyAI STT reconnected")
+            except Exception as e:
+                self._stt_status = f"reconnect failed: {e}"
+                self.ui.log("error", f"stt reconnect: {e}")
 
     async def start(self) -> None:
-        await self.stt.connect()
+        try:
+            await self.stt.connect()
+            self._stt_status = "live"
+        except Exception as e:
+            self._stt_status = f"connect failed: {e}"
+            self.ui.log("error", f"stt connect: {e}")
+            raise
         self.ui.log(
             "boot",
             f"ready · {getattr(self.referee, 'device', '?')} · "
-            f"AssemblyAI {config.STT_MODEL} · {config.LLM_MODEL} · "
-            f"{config.TTS_MODEL}/{config.TTS_VOICE}",
+            f"AssemblyAI {config.STT_MODEL}"
+            f"{' · session ' + self.stt._session_id[:8] if getattr(self.stt, '_session_id', '') else ''} · "
+            f"{config.LLM_MODEL} · {config.TTS_MODEL}/{config.TTS_VOICE}",
         )
         self._tasks = [
             asyncio.create_task(self._referee_loop()),
@@ -436,6 +521,20 @@ class FloorAgent:
             f"{self.frames} frames · p50 {p50:.1f} ms · "
             f"headroom {head:.1f} ms (of 80 ms)"
         )
-        return flag, stats, self._stt_str() or "…", self._context_str(), [
+        return flag, stats, self._stt_display(), self._context_str(), [
             r.as_list() for r in self.rows
         ]
+
+    def _stt_display(self) -> str:
+        text = self._stt_str()
+        if text:
+            return text
+        if self._stt_status in ("", "live", "reconnected"):
+            return "…"
+        return self._stt_status or "…"
+
+    def reset_user_stt(self) -> None:
+        self._user_partial = ""
+        self._user_final = ""
+        self.stt.reset_turn()
+        self._refresh_context()

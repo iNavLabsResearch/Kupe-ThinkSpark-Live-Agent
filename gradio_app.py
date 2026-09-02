@@ -276,7 +276,7 @@ def main() -> None:
         stats = gr.Textbox(value="0 frames", label="Budget", elem_id="stats", interactive=False)
         with gr.Row():
             stt_box = gr.Textbox(
-                value="…", label="STT (processing)", elem_id="meta",
+                value="…", label="STT (AssemblyAI)", elem_id="meta",
                 lines=2, interactive=False,
             )
             ctx_box = gr.Textbox(
@@ -329,9 +329,15 @@ def main() -> None:
         outs = [flag, stats, stt_box, ctx_box, table]
         try:
             tick = gr.Timer(0.1)
-            tick.tick(_snapshot, outputs=outs)
+            try:
+                tick.tick(_snapshot, outputs=outs, show_progress="hidden")
+            except TypeError:
+                tick.tick(_snapshot, outputs=outs)
         except (AttributeError, TypeError):
-            demo.load(_snapshot, None, outs, every=0.1)
+            try:
+                demo.load(_snapshot, None, outs, every=0.1, show_progress="hidden")
+            except TypeError:
+                demo.load(_snapshot, None, outs, every=0.1)
 
     print("==> launching Gradio WebRTC UI  (share=True, not ngrok)")
     launch_kw = dict(

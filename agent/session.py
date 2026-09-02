@@ -65,7 +65,7 @@ class WebSession:
             elif (txt := msg.get("text")) is not None:
                 try:
                     if json.loads(txt).get("type") == "reset":
-                        self.floor.stt.reset_turn()
+                        self.floor.reset_user_stt()
                         self.floor.smoother.reset()
                         self.floor.policy.state = AgentState.IDLE
                         self.floor.agent_text = ""

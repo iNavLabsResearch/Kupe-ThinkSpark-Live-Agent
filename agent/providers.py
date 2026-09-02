@@ -26,35 +26,37 @@ class AssemblyAISTT:
         self._ws = None
         self.partial = ""
         self.final = ""
+        self._session_id = ""
 
     async def connect(self):
         from urllib.parse import urlencode
 
         import websockets
 
-        langs = [c for c in (self.language_hints or []) if c in {"en", "hi"}] or ["en", "hi"]
         qs = urlencode({
             "sample_rate": str(self.sample_rate),
             "encoding": "pcm_s16le",
             "speech_model": config.STT_MODEL,
             "format_turns": "true",
             "include_partial_turns": "true",
-            "language_codes": json.dumps(langs, separators=(",", ":")),
         })
         url = f"{config.STT_WS_URL}?{qs}"
         headers = {"Authorization": self.api_key}
         try:
             self._ws = await websockets.connect(
-                url, additional_headers=headers, max_size=None,
+                url, additional_headers=headers, max_size=None, ping_interval=20,
             )
         except TypeError:
             self._ws = await websockets.connect(
                 url, extra_headers=headers, max_size=None,
             )
         raw = await self._ws.recv()
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8", errors="replace")
         msg = json.loads(raw) if isinstance(raw, str) else {}
         if msg.get("type") == "Error" or msg.get("error"):
             raise RuntimeError(f"assemblyai stt: {msg.get('error') or msg}")
+        self._session_id = msg.get("id") or ""
         return self
 
     async def send_audio(self, pcm16: bytes) -> None:
@@ -67,7 +69,10 @@ class AssemblyAISTT:
             return
         async for raw in self._ws:
             if isinstance(raw, bytes):
-                continue
+                try:
+                    raw = raw.decode("utf-8")
+                except Exception:
+                    continue
             msg = json.loads(raw)
             typ = msg.get("type")
             if typ in ("Begin", "Termination", "SessionInformation"):

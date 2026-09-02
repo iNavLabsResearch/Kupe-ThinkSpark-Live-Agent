@@ -60,6 +60,17 @@ class Policy:
         self._last_backchannel = 0.0
         self._model_spoken = ""
 
+    def _user_stt(self) -> str:
+        if hasattr(self.agent, "_stt_str"):
+            return (self.agent._stt_str() or "").strip()
+        return (self.agent.stt.final or self.agent.stt.partial or "").strip()
+
+    def _reset_stt(self) -> None:
+        if hasattr(self.agent, "reset_user_stt"):
+            self.agent.reset_user_stt()
+        else:
+            self.agent.stt.reset_turn()
+
     # ------------------------------------------------------------------ #
     async def handle(self, flag: str, spoken: str = "") -> Action | None:
         self._model_spoken = (spoken or "").strip()
@@ -82,8 +93,10 @@ class Policy:
 
     # --- speculation --------------------------------------------------- #
     async def _on_prefetch_llm(self) -> Action | None:
-        partial = self.agent.stt.partial.strip()
-        if not partial or self._speculation and not self._speculation.done():
+        partial = self._user_stt()
+        if not partial or _is_placeholder(partial):
+            return None
+        if self._speculation and not self._speculation.done():
             return None
         self.state = AgentState.LLM_GEN
         self._speculated_text = ""
@@ -116,22 +129,22 @@ class Policy:
 
     # --- the user finished --------------------------------------------- #
     async def _on_turn_end(self) -> Action | None:
-        text = (self.agent.stt.final or self.agent.stt.partial).strip()
-        if not text:
+        text = self._user_stt()
+        if not text or _is_placeholder(text):
             return None
 
         # a correct speculation is already in hand — no LLM round trip
         if self._speculated_text:
             reply = self._speculated_text
             self._speculated_text = ""
-            self.agent.stt.reset_turn()
+            self._reset_stt()
             await self.agent.speak(reply)
             return Action("TURN_END", "used speculative reply (0 ms LLM wait)")
 
         if self._speculation and not self._speculation.done():
             self._speculation.cancel()
 
-        self.agent.stt.reset_turn()
+        self._reset_stt()
         await self._run_turn(text)
         return Action("TURN_END", f"commit -> LLM: {text!r}")
 
@@ -172,17 +185,17 @@ class Policy:
         leaving the user hanging."""
         if self.state is not AgentState.IDLE:
             return None
-        text = (self.agent.stt.final or self.agent.stt.partial).strip()
-        if not text:
+        text = self._user_stt()
+        if not text or _is_placeholder(text):
             return None
 
         if self._speculated_text:
             reply, self._speculated_text = self._speculated_text, ""
-            self.agent.stt.reset_turn()
+            self._reset_stt()
             await self.agent.speak(reply)
             return Action("STT_END", "used speculative reply (0 ms LLM wait)")
 
-        self.agent.stt.reset_turn()
+        self._reset_stt()
         await self._run_turn(text)
         return Action("STT_END", f"commit -> LLM: {text!r}")
 
@@ -205,15 +218,19 @@ class Policy:
 
     # --- dead air ------------------------------------------------------- #
     async def on_spoken(self, text: str, flag: str = "") -> Action | None:
-        """Spoken-head back-channel. LISTEN requires STT (B2); INCOMPLETE is thinking (B6)."""
+        """Spoken-head back-channel. LISTEN is pass — never TTS it."""
         text = (text or "").strip()
-        if not text or self.state is not AgentState.IDLE:
+        if not text or _is_placeholder(text):
+            return None
+        if flag == "LISTEN":
+            return None
+        if self.state is not AgentState.IDLE:
             return None
         if getattr(self.agent, "_speaking", False):
             return None
-        if flag == "LISTEN":
-            stt = (self.agent.stt.partial or self.agent.stt.final or "").strip()
-            if not stt:
+        if flag == "INCOMPLETE":
+            stt = self._user_stt()
+            if not stt or _is_placeholder(stt):
                 return None
         await self.agent.speak(text, filler=True)
         return Action("SPOKEN", text)
@@ -224,11 +241,11 @@ class Policy:
         Only used when the spoken head returned empty. One short context-aware
         sentence — never a hardcoded filler.
         """
-        stt = (self.agent.stt.partial or self.agent.stt.final or "").strip()
+        stt = self._user_stt()
         prompt = (
             "The caller went silent. Re-open the conversation in one short spoken "
             "sentence. Match their language (Hindi, English, or Gujarati). "
-            "No quotes, no stage directions."
+            "No quotes, no stage directions. Never say 'please wait' or 'I see'."
         )
         if stt:
             prompt += f" They last said: {stt}"
@@ -249,9 +266,9 @@ class Policy:
         if getattr(self.agent, "_speaking", False):
             return None
         text = self._model_spoken
-        if not text:
+        if not text or _is_placeholder(text):
             text = await self._llm_reopen()
-        if not text:
+        if not text or _is_placeholder(text):
             return None
         self._last_silence_break = now
         self._last_backchannel = now
@@ -260,6 +277,16 @@ class Policy:
 
 
 _ENDERS = ".?!\u0964"
+_PLACEHOLDERS = frozenset({
+    "please wait", "please wait.", "pls wait",
+    "i see", "i see.", "i see...",
+    "mm-hmm", "mm hmm", "mhm", "uh huh", "uh-huh",
+})
+
+
+def _is_placeholder(text: str) -> bool:
+    n = " ".join((text or "").lower().strip().strip(".!?,;:").split())
+    return (not n) or n in _PLACEHOLDERS or n.startswith("please wait")
 
 
 def _sentence_cut(buf: str) -> int | None:
