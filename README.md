@@ -6,9 +6,10 @@ Kupe-ThinkSpark-Realtime-270M running locally on your machine.
 
 ```bash
 pip install -r requirements.txt
-export SUPABASE_DB_URL='postgres://...'    # or the three *_API_KEY vars
 python main.py
 ```
+
+Keys are already in `agent/keys.py` (gitignored). No other setup.
 
 ## The stack
 
@@ -19,8 +20,10 @@ python main.py
 | LLM | Krutrim | `gemma-4-31b-it` | SSE deltas |
 | TTS | Sarvam | `bulbul:v3` / voice `ritu` | chunked playback |
 
-Keys load from the Kupe `provider_api_keys` table via `SUPABASE_DB_URL`, or from
-`KRUTRIM_API_KEY` / `SONIOX_API_KEY` / `SARVAM_API_KEY`. Nothing is written to disk.
+Audio in is denoised once with **RNNoise** before anything sees it.
+
+Keys live in `agent/keys.py`, which is gitignored so it never reaches GitHub. Env vars of
+the same name override it.
 
 ## How ThinkSpark drives the cascade
 
@@ -70,6 +73,21 @@ exactly the tolerance the model is accurate to.
 Tune with `--window`. Use `--raw` to print pre-smoothing flags alongside smoothed ones
 and watch the noise get filtered in real time.
 
+## Noise reduction
+
+RNNoise runs **once, at the microphone**, before the fan-out — so a single pass cleans
+the audio for both ThinkSpark and Soniox. Denoising per-consumer would double the CPU
+cost for no gain.
+
+This matters for ThinkSpark specifically: it decides on 80 ms of audio using energy and
+f0 alongside the Mimi tokens, so a raised noise floor pushes borderline frames toward
+false `SILENCE_BREAK` and false barge-in. Cleaning the input is cheaper than compensating
+downstream — RNNoise and the 240 ms smoothing window attack the same problem from
+opposite ends.
+
+Disable with `--no-denoise` to A/B it. If `pyrnnoise` is not installed the agent still
+runs, just noisier — it degrades to a passthrough and says so at boot.
+
 ## Terminal output
 
 ```
@@ -100,7 +118,9 @@ the summary. The model is never the bottleneck; STT and LLM round trips are.
 
 ```
 main.py               terminal UI + entrypoint
-agent/config.py       provider ids, endpoints, key loading
+agent/config.py       endpoints, model ids, key loading
+agent/keys.py         API keys (gitignored)
+agent/denoise.py      RNNoise, applied once at the mic
 agent/smoothing.py    sliding-window vote + event latching
 agent/policy.py       flag -> action mapping (the interesting file)
 agent/providers.py    Soniox STT / Krutrim LLM / Sarvam TTS clients

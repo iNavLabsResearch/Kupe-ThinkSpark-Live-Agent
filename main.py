@@ -85,7 +85,8 @@ async def _run(args) -> None:
 
     ui = UI(show_raw=args.raw)
     keys = load_keys()
-    agent = LiveAgent(keys, ui, device=args.device, window=args.window)
+    agent = LiveAgent(keys, ui, device=args.device, window=args.window,
+                      denoise=not args.no_denoise)
     try:
         await agent.run()
     except KeyboardInterrupt:
@@ -100,6 +101,7 @@ def main() -> None:
     ap.add_argument("--window", type=int, default=3,
                     help="smoothing window in frames (3 = 240 ms, matches the eval collar)")
     ap.add_argument("--raw", action="store_true", help="also print pre-smoothing flags")
+    ap.add_argument("--no-denoise", action="store_true", help="disable RNNoise")
     args = ap.parse_args()
 
     try:

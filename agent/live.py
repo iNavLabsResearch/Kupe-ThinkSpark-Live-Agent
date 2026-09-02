@@ -21,6 +21,7 @@ import wave
 import numpy as np
 
 from agent import config
+from agent.denoise import Denoiser
 from agent.policy import AgentState, Policy
 from agent.providers import KrutrimLLM, SarvamTTS, SonioxSTT
 from agent.smoothing import FlagSmoother
@@ -44,7 +45,8 @@ def _resample(x: np.ndarray, src: int, dst: int) -> np.ndarray:
 
 
 class LiveAgent:
-    def __init__(self, keys, ui, device: str = "auto", window: int = 3):
+    def __init__(self, keys, ui, device: str = "auto", window: int = 3,
+                 denoise: bool = True):
         from kupe import ThinkSpark
 
         self.ui = ui
@@ -55,6 +57,10 @@ class LiveAgent:
         self.stt = SonioxSTT(keys.stt, sample_rate=STT_RATE)
         self.llm = KrutrimLLM(keys.llm)
         self.tts = SarvamTTS(keys.tts)
+        self.denoiser = Denoiser(sample_rate=MIC_RATE, enabled=denoise)
+        ui.log("boot", "RNNoise active" if self.denoiser.available
+               else "RNNoise unavailable — passthrough (pip install pyrnnoise)",
+               style="green" if self.denoiser.available else "yellow")
         self.smoother = FlagSmoother(window=window)
         self.policy = Policy(self)
 
@@ -174,9 +180,9 @@ class LiveAgent:
                 self.ui.log(action.kind, action.detail, style="bold yellow")
 
     def _chunks(self):
-        """Mic frames, tee'd to the STT queue on the way past."""
+        """Mic frames: denoise once, then fan out to ThinkSpark and STT."""
         while True:
-            chunk = self._mic_q.get()
+            chunk = self.denoiser(self._mic_q.get())
             pcm = _f32_to_pcm16(_resample(chunk, MIC_RATE, STT_RATE))
             try:
                 self._stt_q.put_nowait(pcm)
