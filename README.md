@@ -9,6 +9,26 @@ Kupe-ThinkSpark-Realtime-270M running locally on your machine.
 ./setup.sh --docker     # or run it containerised
 ```
 
+### Docker
+
+The container's own IP (`172.x`) is **not** reachable from your browser — you must
+publish the port and connect via the host:
+
+```bash
+docker compose up --build          # port 8000 already published
+```
+
+or plain docker:
+
+```bash
+docker build -t kupe-thinkspark-agent .
+docker run --rm --gpus all -p 8000:8000 --env-file .env \
+  -v hf-cache:/cache/hf kupe-thinkspark-agent
+```
+
+Then paste `ws://localhost:8000/ws` into the UI — or `ws://<host-lan-ip>:8000/ws`
+from another device. Without `-p 8000:8000` nothing outside the container can connect.
+
 **Terminal:**
 ```bash
 source .venv/bin/activate

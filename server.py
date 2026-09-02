@@ -45,6 +45,20 @@ def lan_ip() -> str:
         s.close()
 
 
+def in_container() -> bool:
+    """True inside Docker. The container's own IP (172.x) is NOT reachable from a
+    browser on the host, so the banner must not advertise it."""
+    import os
+
+    if os.path.exists("/.dockerenv"):
+        return True
+    try:
+        with open("/proc/1/cgroup") as f:
+            return any(x in f.read() for x in ("docker", "containerd", "kubepods"))
+    except Exception:
+        return False
+
+
 def build_app(device: str, window: int, denoise: bool):
     from fastapi import FastAPI, WebSocket, WebSocketDisconnect
     from fastapi.middleware.cors import CORSMiddleware
@@ -88,13 +102,24 @@ def build_app(device: str, window: int, denoise: bool):
             await session.close()
 
     def _print_banner():
-        ip = lan_ip()
-        url = f"ws://{ip}:{PORT}/ws"
-        line = "=" * 62
+        line = "=" * 66
         print(f"\n{line}\n  Kupe ThinkSpark Live Agent — ready\n{line}")
-        print(f"  Paste this into the UI:\n\n      {url}\n")
-        print(f"  local:   ws://127.0.0.1:{PORT}/ws")
-        print(f"  health:  http://{ip}:{PORT}/health")
+
+        if in_container():
+            # 172.x is the container's private address — a browser on the host cannot
+            # reach it. With `-p 8000:8000` the host's own address is the right one.
+            print("  running in Docker — connect via the HOST, not the container IP\n")
+            print(f"  Paste this into the UI:\n\n      ws://localhost:{PORT}/ws\n")
+            print("  From another device on your LAN, use the host machine's IP:")
+            print(f"      ws://<HOST-LAN-IP>:{PORT}/ws\n")
+            print(f"  Requires the container to be started with  -p {PORT}:{PORT}")
+            print(f"  health:  http://localhost:{PORT}/health")
+        else:
+            ip = lan_ip()
+            print(f"  Paste this into the UI:\n\n      ws://{ip}:{PORT}/ws\n")
+            print(f"  local:   ws://127.0.0.1:{PORT}/ws")
+            print(f"  health:  http://{ip}:{PORT}/health")
+
         print(f"  web UI:  cd web && npm install && npm run dev")
         print(f"{line}\n")
 
