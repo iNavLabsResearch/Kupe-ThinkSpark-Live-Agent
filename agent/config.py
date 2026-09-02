@@ -48,16 +48,16 @@ def load_keys() -> Keys:
     try:
         from agent import keys as _k
     except ImportError:
-        raise SystemExit(
-            "agent/keys.py is missing (it is gitignored, so a fresh clone has none).\n"
-            "Create it with KRUTRIM_API_KEY / SONIOX_API_KEY / SARVAM_API_KEY, "
-            "or export those three as env vars."
-        )
+        _k = None
 
-    soniox = os.environ.get("SONIOX_API_KEY") or _k.SONIOX_API_KEY
-    return Keys(
-        llm=os.environ.get("KRUTRIM_API_KEY") or _k.KRUTRIM_API_KEY,
-        stt=soniox,
-        tts=soniox,
-        hf=os.environ.get("HF_TOKEN") or getattr(_k, "HF_TOKEN", ""),
-    )
+    def _get(name: str) -> str:
+        return os.environ.get(name) or (getattr(_k, name, "") if _k else "") or ""
+
+    soniox = _get("SONIOX_API_KEY")
+    llm = _get("KRUTRIM_API_KEY")
+    if not llm or not soniox:
+        raise SystemExit(
+            "Need KRUTRIM_API_KEY and SONIOX_API_KEY in .env / the environment "
+            "(or in agent/keys.py)."
+        )
+    return Keys(llm=llm, stt=soniox, tts=soniox, hf=_get("HF_TOKEN"))

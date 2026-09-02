@@ -201,35 +201,14 @@ web/                  React UI — paste the URL, talk
 .env.example          key template
 ```
 
-## Reachability (tunnel is optional)
+## Reachability
 
-The server binds `0.0.0.0:8000`. Use the path your host actually routes.
+`python server.py` binds `:8000`. If `NGROK_AUTHTOKEN` is set it also opens ngrok
+and prints a `wss://….ngrok-free.app/ws` URL — that is what you paste into the UI.
+Works on Colab, Kaggle, and RunPod (no inbound ports, no nginx).
 
-**Direct IP** — Vast.ai, a colo, a local GPU box, anything that publishes a port:
-
-```
-ws://<public-ip>:8000/ws
-```
-
-Open 8000 (or the mapped host port) in the provider panel. No tunnel.
-
-**nginx on port 80** — same hosts, nicer URL:
-
-```bash
-./expose.sh                 # :80 -> :8000, WebSocket upgrade on
-# UI:  ws://<public-ip>/ws
-```
-
-**Tunnel** — only when inbound ports never reach the container (typical RunPod):
-
-```bash
-ssh ... -N -L 8000:localhost:8000          # then ws://127.0.0.1:8000/ws
-./tunnel.sh quick                          # throwaway wss://…trycloudflare.com/ws
-./tunnel.sh setup && ./tunnel.sh run       # optional: wss://thinkspark.kupe.in/ws
-```
-
-`wss://` is required on HTTPS pages. The RunPod `*.proxy.runpod.net` hostname often
-does not upgrade WebSockets — prefer direct IP, nginx, or a tunnel instead.
+Direct IP still works on Vast / a box that publishes 8000: `ws://<public-ip>:8000/ws`.
+`--no-ngrok` skips the tunnel.
 
 ## Model weights
 

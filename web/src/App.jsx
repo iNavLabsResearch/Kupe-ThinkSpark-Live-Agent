@@ -151,7 +151,7 @@ export default function App() {
           <input
             value={url}
             onChange={(e) => setUrl(e.target.value)}
-            placeholder="ws://HOST:8000/ws"
+            placeholder="wss://….ngrok-free.app/ws"
             disabled={status === "connected"}
           />
           {status === "connected" ? (

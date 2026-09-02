@@ -45,7 +45,7 @@ cat <<'MSG'
 
 setup complete.
 
-  ./start.sh                # venv + deps + preflight + server (use this)
+  ./start.sh                # venv + deps + server + ngrok URL
   ./start.sh --tmux         # same, detached on the pod
 
   python main.py            # terminal-only agent
