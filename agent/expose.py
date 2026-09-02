@@ -1,75 +1,114 @@
-"""ngrok tunnel so Colab / Kaggle / RunPod can reach /ws without inbound ports."""
+"""Public HTTPS URL for Colab / Kaggle / RunPod.
+
+Ngrok's free plan intercepts WebSocket upgrades (health works, /ws does not).
+Cloudflare quick tunnels do upgrade WebSockets, so that is the default.
+"""
 
 from __future__ import annotations
 
 import os
+import platform
+import re
+import stat
+import subprocess
+import threading
+import time
+import urllib.request
 
-# Fallback if .env / the environment has no token (Colab, Kaggle, fresh pods).
-_DEFAULT_NGROK_AUTHTOKEN = "3Imhi3otkOTZqNt0Ln1FuXbq69a_7buSE2HNJSsJnzM5mVWRb"
-
-_tunnel = None
-
-
-def auth_token() -> str:
-    return os.environ.get("NGROK_AUTHTOKEN", "").strip() or _DEFAULT_NGROK_AUTHTOKEN
+_cf_proc: subprocess.Popen | None = None
+_cf_bin = "/tmp/kupe-cloudflared"
 
 
 def to_ws(https_url: str) -> str:
     u = https_url.rstrip("/")
     if u.startswith("https://"):
-        ws = "wss://" + u[len("https://"):] + "/ws"
-    elif u.startswith("http://"):
-        ws = "ws://" + u[len("http://"):] + "/ws"
-    else:
-        ws = u + "/ws"
-    if "ngrok" in ws and "ngrok-skip-browser-warning" not in ws:
-        ws += "?ngrok-skip-browser-warning=true"
-    return ws
+        return "wss://" + u[len("https://"):] + "/ws"
+    if u.startswith("http://"):
+        return "ws://" + u[len("http://"):] + "/ws"
+    return u + "/ws"
 
 
-def open_ngrok(port: int) -> str:
-    """Open an HTTPS tunnel to localhost:`port`. Always returns a public https URL."""
-    global _tunnel
-    token = auth_token()
+def _ensure_cloudflared() -> str:
+    for name in ("cloudflared", _cf_bin):
+        if name != _cf_bin and _which(name):
+            return name
+        if name == _cf_bin and os.path.isfile(_cf_bin) and os.access(_cf_bin, os.X_OK):
+            return _cf_bin
 
+    machine = platform.machine().lower()
+    arch = "arm64" if ("arm" in machine or "aarch" in machine) else "amd64"
+    url = (
+        "https://github.com/cloudflare/cloudflared/releases/latest/download/"
+        f"cloudflared-linux-{arch}"
+    )
+    print(f"==> downloading cloudflared ({arch})")
+    urllib.request.urlretrieve(url, _cf_bin)
+    os.chmod(_cf_bin, os.stat(_cf_bin).st_mode | stat.S_IEXEC)
+    return _cf_bin
+
+
+def _which(cmd: str) -> str | None:
+    from shutil import which
+    return which(cmd)
+
+
+def open_tunnel(port: int) -> str:
+    """HTTPS URL that can carry WebSockets. Cloudflare first; ngrok is HTTP-only on free."""
     try:
-        from pyngrok import ngrok
-    except ImportError as e:
-        raise SystemExit("pyngrok missing — pip install pyngrok") from e
-
-    ngrok.set_auth_token(token)
-    try:
-        ngrok.kill()
-    except Exception:
-        pass
-
-    kwargs = {"inspect": False}
-    domain = os.environ.get("NGROK_DOMAIN", "").strip()
-    if domain:
-        kwargs["hostname"] = domain
-
-    try:
-        _tunnel = ngrok.connect(addr=port, proto="http", **kwargs)
-    except TypeError:
-        kwargs.pop("inspect", None)
-        try:
-            _tunnel = ngrok.connect(addr=port, proto="http", **kwargs)
-        except Exception as e:
-            raise SystemExit(f"ngrok failed to start: {e}") from e
+        url = _open_cloudflare(port)
+        print(f"==> cloudflare tunnel  {url}")
+        return url
     except Exception as e:
-        raise SystemExit(f"ngrok failed to start: {e}") from e
+        print(f"==> cloudflare tunnel failed ({e}) — WebSockets will not work on free ngrok")
+        raise SystemExit(
+            "Need a WebSocket-capable tunnel. Install cloudflared or allow GitHub downloads.\n"
+            f"  last error: {e}"
+        ) from e
 
-    url = _tunnel.public_url
-    if url.startswith("http://"):
-        url = "https://" + url[len("http://"):]
-    return url
+
+def _open_cloudflare(port: int) -> str:
+    global _cf_proc
+    bin_path = _ensure_cloudflared()
+    _cf_proc = subprocess.Popen(
+        [bin_path, "tunnel", "--no-autoupdate", "--url", f"http://127.0.0.1:{port}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    found: list[str] = []
+    done = threading.Event()
+
+    def _read():
+        assert _cf_proc and _cf_proc.stdout
+        for line in _cf_proc.stdout:
+            line = line.strip()
+            if line:
+                print(f"    cloudflared: {line}")
+            m = re.search(r"https://[a-z0-9-]+\.trycloudflare\.com", line, re.I)
+            if m and not found:
+                found.append(m.group(0))
+                done.set()
+
+    threading.Thread(target=_read, daemon=True).start()
+    if not done.wait(timeout=45):
+        close_tunnel()
+        raise TimeoutError("cloudflared did not print a trycloudflare.com URL in 45s")
+    time.sleep(0.4)
+    return found[0]
 
 
-def close_ngrok() -> None:
-    global _tunnel
-    try:
-        from pyngrok import ngrok
-        ngrok.kill()
-    except Exception:
-        pass
-    _tunnel = None
+def close_tunnel() -> None:
+    global _cf_proc
+    if _cf_proc and _cf_proc.poll() is None:
+        _cf_proc.terminate()
+        try:
+            _cf_proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            _cf_proc.kill()
+    _cf_proc = None
+
+
+# Back-compat names used by older server.py copies on the pod
+open_ngrok = open_tunnel
+close_ngrok = close_tunnel

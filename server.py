@@ -1,20 +1,13 @@
 #!/usr/bin/env python
-"""FastAPI websocket server. Binds 0.0.0.0 and, if NGROK_AUTHTOKEN is set, opens ngrok.
+"""FastAPI websocket server. Binds 0.0.0.0 and opens a Cloudflare quick tunnel.
 
     python server.py                 # loads .env, serves :8000, prints the UI URL
-    python server.py --no-ngrok      # local / direct-IP only
-
-Protocol (one websocket, both directions):
-
-    client -> server   binary   PCM16 mono @ 24 kHz, any chunk size
-    client -> server   text     {"type":"reset"}
-    server -> client   text     JSON events, plus binary PCM16 TTS
+    python server.py --no-tunnel     # local / direct-IP only
 """
 
 from __future__ import annotations
 
 import argparse
-import os
 from pathlib import Path
 from contextlib import asynccontextmanager
 
@@ -28,15 +21,14 @@ try:
 except ImportError:
     pass
 
-MIC_RATE = 24_000
 PORT = 8000
 WEB_APP = Path(__file__).parent / "web" / "app.html"
 
 
-def build_app(device: str, window: int, denoise: bool, use_ngrok: bool):
+def build_app(device: str, window: int, denoise: bool, use_tunnel: bool):
     from fastapi import FastAPI, WebSocket, WebSocketDisconnect
     from fastapi.middleware.cors import CORSMiddleware
-    from fastapi.responses import FileResponse
+    from fastapi.responses import FileResponse, Response
 
     from agent.session import WebSession
 
@@ -47,12 +39,12 @@ def build_app(device: str, window: int, denoise: bool, use_ngrok: bool):
         print(f"loading ThinkSpark on device={device} ...")
         state["referee"] = config.load_thinkspark(device)
         print(f"ThinkSpark ready on {state['referee'].device}")
-        public_https = expose.open_ngrok(PORT) if use_ngrok else None
+        public_https = expose.open_tunnel(PORT) if use_tunnel else None
         _print_banner(public_https)
         try:
             yield
         finally:
-            expose.close_ngrok()
+            expose.close_tunnel()
 
     app = FastAPI(title="Kupe ThinkSpark Live Agent", lifespan=lifespan)
     app.add_middleware(
@@ -66,6 +58,10 @@ def build_app(device: str, window: int, denoise: bool, use_ngrok: bool):
     async def index():
         return FileResponse(WEB_APP)
 
+    @app.get("/favicon.ico")
+    async def favicon():
+        return Response(status_code=204)
+
     @app.get("/health")
     async def health():
         r = state["referee"]
@@ -78,8 +74,7 @@ def build_app(device: str, window: int, denoise: bool, use_ngrok: bool):
 
     @app.websocket("/ws")
     async def ws_endpoint(ws: WebSocket):
-        print(f"ws handshake  origin={ws.headers.get('origin')}  "
-              f"ua={(ws.headers.get('user-agent') or '')[:60]}")
+        print(f"ws handshake  origin={ws.headers.get('origin')}")
         await ws.accept()
         print("ws accepted")
         session = WebSession(
@@ -96,14 +91,12 @@ def build_app(device: str, window: int, denoise: bool, use_ngrok: bool):
         line = "=" * 66
         print(f"\n{line}\n  Kupe ThinkSpark Live Agent — ready\n{line}")
         if public_https:
-            print("  Open this URL in the browser (click ngrok 'Visit Site' once):\n")
+            print("  Open this in the browser, then hit Connect:\n")
             print(f"      {public_https}\n")
-            print("  Then hit Connect — same origin, WebSockets work.")
-            print("  Do NOT paste wss:// into localhost:5173 (ngrok blocks that).\n")
             print(f"  ws:      {expose.to_ws(public_https)}")
             print(f"  health:  {public_https}/health")
         else:
-            print("  UI:  http://127.0.0.1:{}/".format(PORT))
+            print(f"  UI:  http://127.0.0.1:{PORT}/")
             print(f"  ws:  ws://127.0.0.1:{PORT}/ws")
         print(f"{line}\n")
 
@@ -118,15 +111,17 @@ def main() -> None:
     ap.add_argument("--device", default="auto", help="cuda | mps | cpu | auto")
     ap.add_argument("--window", type=int, default=3)
     ap.add_argument("--no-denoise", action="store_true")
-    ap.add_argument("--no-ngrok", action="store_true", help="do not open an ngrok tunnel")
+    ap.add_argument("--no-tunnel", action="store_true", help="do not open a public tunnel")
+    ap.add_argument("--no-ngrok", action="store_true", help=argparse.SUPPRESS)
     args = ap.parse_args()
     PORT = args.port
 
-    use_ngrok = not args.no_ngrok
-
     import uvicorn
 
-    app = build_app(args.device, args.window, not args.no_denoise, use_ngrok)
+    app = build_app(
+        args.device, args.window, not args.no_denoise,
+        use_tunnel=not (args.no_tunnel or args.no_ngrok),
+    )
     uvicorn.run(
         app,
         host=args.host,
@@ -134,6 +129,7 @@ def main() -> None:
         log_level="warning",
         proxy_headers=True,
         forwarded_allow_ips="*",
+        ws="websockets",
     )
 
 

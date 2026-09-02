@@ -75,7 +75,28 @@ class SonioxSTT:
                 self.partial = partial_txt
                 yield partial_txt, False
 
-    def reset_turn(self) -> None:
+    async def transcribe_clip(self, pcm16: bytes, timeout: float = 12.0) -> str:
+        """One-shot clip STT for Gradio. Connect, send, wait for a final, close."""
+        await self.connect()
+        # pad a bit of silence so endpoint detection fires
+        silence = b"\x00\x00" * (self.sample_rate // 4)
+        await self.send_audio(pcm16 + silence)
+        try:
+            await self._ws.send(json.dumps({"type": "finalize"}))
+        except Exception:
+            pass
+        text = ""
+        try:
+            async with asyncio.timeout(timeout):
+                async for tok, is_final in self.transcripts():
+                    if is_final:
+                        text += tok.replace("<end>", "")
+                        if "<end>" in tok:
+                            break
+        except TimeoutError:
+            pass
+        await self.close()
+        return (text or self.final).strip()
         self.partial = ""
         self.final = ""
 

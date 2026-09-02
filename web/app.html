@@ -59,7 +59,7 @@
         <span id="dot" class="dot"></span>
       </div>
     </header>
-    <p class="hint">Open this page on the ngrok https URL, click through the warning once, then Connect. Mic needs a secure origin.</p>
+    <p class="hint">Open the trycloudflare https URL this server printed. Then Connect. Allow the mic.</p>
     <section class="hero">
       <div class="flag" id="flag">—</div>
       <div class="meta" id="meta">0 frames · p50 0.0 ms · budget 80 ms</div>
@@ -78,13 +78,7 @@
 
     function sameOriginWs() {
       const p = location.protocol === "https:" ? "wss:" : "ws:";
-      let u = p + "//" + location.host + "/ws";
-      if (location.host.includes("ngrok")) u += "?ngrok-skip-browser-warning=true";
-      return u;
-    }
-    function skipNgrok(u) {
-      if (!u.includes("ngrok") || u.includes("ngrok-skip-browser-warning")) return u;
-      return u + (u.includes("?") ? "&" : "?") + "ngrok-skip-browser-warning=true";
+      return p + "//" + location.host + "/ws";
     }
 
     const $url = document.getElementById("url");
@@ -95,9 +89,9 @@
     const $tr = document.getElementById("transcript");
     const $log = document.getElementById("log");
 
-    $url.value = location.host.includes("ngrok")
-      ? sameOriginWs()
-      : (localStorage.getItem("kupe_ws_url") || sameOriginWs());
+    $url.value = (location.hostname === "localhost" || location.hostname === "127.0.0.1")
+      ? (localStorage.getItem("kupe_ws_url") || sameOriginWs())
+      : sameOriginWs();
 
     let ws, stream, ctx, playHead = 0, frames = 0, lats = [];
     let status = "idle";
@@ -122,7 +116,7 @@
     async function connect() {
       if (status === "connected") { disconnect(); return; }
       setStatus("connecting");
-      const url = skipNgrok($url.value.trim());
+      const url = $url.value.trim();
       ws = new WebSocket(url);
       ws.binaryType = "arraybuffer";
       ws.onopen = async () => {
