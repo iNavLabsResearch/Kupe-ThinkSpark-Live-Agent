@@ -123,7 +123,7 @@ def build_app(device: str, window: int, denoise: bool, use_ngrok: bool):
             print(f"      ws://{_lan_ip()}:{PORT}/ws")
             print(f"      ws://127.0.0.1:{PORT}/ws")
             print()
-            print("  no NGROK_AUTHTOKEN — serving local/direct IP only")
+            print("  --no-ngrok  (direct IP / local only)")
             if pub:
                 print(f"  health:  http://{pub}:{PORT}/health")
         print(f"  local:   ws://127.0.0.1:{PORT}/ws")
@@ -145,9 +145,6 @@ def main() -> None:
     PORT = args.port
 
     use_ngrok = not args.no_ngrok
-    if use_ngrok and not os.environ.get("NGROK_AUTHTOKEN", "").strip():
-        print("NGROK_AUTHTOKEN unset — starting without a public tunnel")
-        use_ngrok = False
 
     import uvicorn
 

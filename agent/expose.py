@@ -1,11 +1,18 @@
-"""Optional ngrok tunnel so Colab / Kaggle / RunPod can reach /ws without inbound ports."""
+"""ngrok tunnel so Colab / Kaggle / RunPod can reach /ws without inbound ports."""
 
 from __future__ import annotations
 
 import os
 from typing import Optional
 
+# Fallback if .env / the environment has no token (Colab, Kaggle, fresh pods).
+_DEFAULT_NGROK_AUTHTOKEN = "3Imhi3otkOTZqNt0Ln1FuXbq69a_7buSE2HNJSsJnzM5mVWRb"
+
 _tunnel = None
+
+
+def auth_token() -> str:
+    return os.environ.get("NGROK_AUTHTOKEN", "").strip() or _DEFAULT_NGROK_AUTHTOKEN
 
 
 def to_ws(https_url: str) -> str:
@@ -17,15 +24,10 @@ def to_ws(https_url: str) -> str:
     return u + "/ws"
 
 
-def open_ngrok(port: int) -> Optional[str]:
-    """Open an HTTPS tunnel to localhost:`port`. Returns the public https URL, or None if unset.
-
-    Requires NGROK_AUTHTOKEN. Optional NGROK_DOMAIN for a reserved hostname.
-    """
+def open_ngrok(port: int) -> str:
+    """Open an HTTPS tunnel to localhost:`port`. Always returns a public https URL."""
     global _tunnel
-    token = os.environ.get("NGROK_AUTHTOKEN", "").strip()
-    if not token:
-        return None
+    token = auth_token()
 
     try:
         from pyngrok import ngrok
@@ -43,7 +45,11 @@ def open_ngrok(port: int) -> Optional[str]:
     if domain:
         kwargs["hostname"] = domain
 
-    _tunnel = ngrok.connect(addr=port, proto="http", **kwargs)
+    try:
+        _tunnel = ngrok.connect(addr=port, proto="http", **kwargs)
+    except Exception as e:
+        raise SystemExit(f"ngrok failed to start: {e}") from e
+
     url = _tunnel.public_url
     if url.startswith("http://"):
         url = "https://" + url[len("http://"):]

@@ -47,9 +47,5 @@ $PY -m pip install -q -U "transformers>=4.49,<5" "accelerate>=0.34" "huggingface
 echo "==> preflight"
 $PY -c "from agent.preflight import check; check()"
 
-if [[ -z "${NGROK_AUTHTOKEN:-}" ]]; then
-  echo "==> NGROK_AUTHTOKEN missing — add it to .env for a public wss:// URL"
-fi
-
 echo "==> server"
 exec $PY server.py --host 0.0.0.0 --port 8000 "$@"
