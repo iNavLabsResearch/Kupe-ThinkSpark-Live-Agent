@@ -1,4 +1,5 @@
-kupe[thinkspark]>=0.2.0
+# from git until 0.3.0 is on PyPI — 0.2.x lacks subfolder= and still fetches gated Gemma
+kupe[thinkspark] @ git+https://github.com/kupe-ai/kupe-sdk.git@main
 sounddevice>=0.4
 websockets>=12.0
 openai>=1.40
