@@ -94,7 +94,13 @@ def respond(audio, history):
     except Exception as e:
         return history, None, f"error: {e}"
     if user:
-        history = history + [[user, reply]]
+        if history and isinstance(history[0], dict):
+            history = history + [
+                {"role": "user", "content": user},
+                {"role": "assistant", "content": reply},
+            ]
+        else:
+            history = history + [[user, reply]]
     return history, out, "ok"
 
 
@@ -115,7 +121,10 @@ def main() -> None:
             "## Kupe ThinkSpark\n"
             "Hold the mic, speak, release. The agent transcribes, replies, and talks back."
         )
-        chat = gr.Chatbot(label="Conversation", height=360, type="tuples")
+        try:
+            chat = gr.Chatbot(label="Conversation", height=360, type="tuples")
+        except TypeError:
+            chat = gr.Chatbot(label="Conversation", height=360)
         with gr.Row():
             mic = gr.Audio(
                 sources=["microphone"],
