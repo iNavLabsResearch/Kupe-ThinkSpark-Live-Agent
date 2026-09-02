@@ -101,10 +101,8 @@ def build_app(device: str, window: int, denoise: bool):
 
     @app.on_event("startup")
     async def _load():
-        from kupe import ThinkSpark
-
         print(f"loading ThinkSpark on device={device} ...")
-        state["referee"] = ThinkSpark(config.TS_REPO, device=device, subfolder=config.TS_SUBFOLDER)
+        state["referee"] = config.load_thinkspark(device)
         print(f"ThinkSpark ready on {state['referee'].device}")
         _print_banner()
 

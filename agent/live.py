@@ -45,11 +45,9 @@ def _resample(x: np.ndarray, src: int, dst: int) -> np.ndarray:
 class LiveAgent:
     def __init__(self, keys, ui, device: str = "auto", window: int = 3,
                  denoise: bool = True):
-        from kupe import ThinkSpark
-
         self.ui = ui
         ui.log("boot", f"loading ThinkSpark on device={device} ...")
-        self.referee = ThinkSpark(config.TS_REPO, device=device, subfolder=config.TS_SUBFOLDER)
+        self.referee = config.load_thinkspark(device)
         ui.log("boot", f"ThinkSpark ready on {self.referee.device}")
 
         self.stt = SonioxSTT(keys.stt, sample_rate=STT_RATE)
