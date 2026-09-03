@@ -46,6 +46,26 @@ class RadioLiveAgent(LiveAgent):
         self._radio_volume = radio_volume
         self._hear_radio = hear_radio
         self._radio_q: queue.Queue = queue.Queue(maxsize=100)
+        self._paused = threading.Event()          # pp = pause radio, rr = resume
+        self._silence = np.zeros(FRAME, dtype=np.float32)
+
+    def _keyboard_thread(self) -> None:
+        """Type `pp`+Enter to pause the radio (agent hears silence → watch it react),
+        `rr`+Enter to resume, `q`+Enter to quit."""
+        import sys
+        for line in sys.stdin:
+            cmd = line.strip().lower()
+            if cmd in ("pp", "p", "pause"):
+                self._paused.set()
+                self.ui.log("boot", "⏸  RADIO PAUSED — feeding silence to the model; "
+                            "watch for SILENCE_BREAK / TURN_END. type rr to resume.",
+                            style="bold yellow")
+            elif cmd in ("rr", "r", "resume"):
+                self._paused.clear()
+                self.ui.log("boot", "▶  RADIO RESUMED", style="bold green")
+            elif cmd in ("q", "quit", "exit"):
+                self._shutdown.set()
+                break
 
     def _radio_play(self) -> None:
         """Play the radio to the speakers on its own output stream, ducked while the
@@ -81,6 +101,7 @@ class RadioLiveAgent(LiveAgent):
             return
         if self._hear_radio:
             threading.Thread(target=self._radio_play, daemon=True).start()
+        threading.Thread(target=self._keyboard_thread, daemon=True).start()
         cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error",
                "-reconnect", "1", "-reconnect_streamed", "1",
                "-reconnect_delay_max", "5", "-user_agent", "Mozilla/5.0",
@@ -97,6 +118,12 @@ class RadioLiveAgent(LiveAgent):
                     break
                 got += 1
                 frame = np.frombuffer(buf, dtype=np.float32).copy()
+                if self._paused.is_set():
+                    # simulate the caller going silent: feed dead air to the model (so it
+                    # reacts) and mute the radio on the speakers. ffmpeg keeps draining so
+                    # the stream stays real-time; on resume we pick up live again.
+                    self.floor.push_audio(self._silence, SR)
+                    continue
                 self.floor.push_audio(frame, SR)          # -> STT + ThinkSpark
                 if self._hear_radio:
                     try:
@@ -140,6 +167,9 @@ async def _run(args) -> None:
     ui.c.print("[grey42]tags: MIC▸TS = radio▸ThinkSpark frame · TS▸ decision · STT · "
                "LLM⟳/✓/✗ · TURN▸ · BARGE!/DUCK · BACKCH/REOPEN · TTS◂ (plays on speakers)[/]")
     endp = "STT+ThinkSpark" if agent.floor._use_stt_endpoint else "ThinkSpark only"
+    ui.c.print("[bold yellow]controls:[/] type [bold]pp[/]+Enter to PAUSE the radio "
+               "(caller goes silent → watch the model), [bold]rr[/]+Enter to resume, "
+               "[bold]q[/]+Enter to quit.")
     ui.log("ready", f"radio agent live — endpoint: {endp}. Ctrl+C to stop.")
     try:
         await agent.run()
