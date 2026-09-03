@@ -50,9 +50,12 @@ class FlagSmoother:
 
     def __init__(self, window: int = 3, min_votes: int = 2, urgent_votes: int = 1,
                  event_cooldown: int = 8, urgent_cooldown: int = 2):
-        self.window = window
-        self.min_votes = min_votes
-        self.urgent_votes = urgent_votes
+        self.window = max(1, window)
+        # can't require more votes than the window holds — otherwise a small window
+        # (e.g. --window 1) can NEVER reach the threshold and suppresses everything.
+        # --window 1 => min_votes 1 => act on the raw per-frame flag (latch/cooldown only).
+        self.min_votes = min(min_votes, self.window)
+        self.urgent_votes = min(urgent_votes, self.window)
         self.event_cooldown = event_cooldown
         self.urgent_cooldown = urgent_cooldown
         self._buf: deque[str] = deque(maxlen=window)

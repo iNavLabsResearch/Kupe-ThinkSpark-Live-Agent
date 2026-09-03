@@ -20,8 +20,10 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 import argparse
 import asyncio
+import queue
 import shutil
 import subprocess
+import threading
 
 import numpy as np
 
@@ -37,19 +39,53 @@ FRAME = SR * 80 // 1000            # 1920 samples / 80 ms
 class RadioLiveAgent(LiveAgent):
     """LiveAgent with the microphone replaced by an ffmpeg radio reader."""
 
-    def __init__(self, *a, url: str = DEFAULT_URL, **kw):
+    def __init__(self, *a, url: str = DEFAULT_URL, radio_volume: float = 0.6,
+                 hear_radio: bool = True, **kw):
         super().__init__(*a, **kw)
         self._url = url
+        self._radio_volume = radio_volume
+        self._hear_radio = hear_radio
+        self._radio_q: queue.Queue = queue.Queue(maxsize=100)
 
-    def _mic_thread(self) -> None:  # overrides the sounddevice mic
+    def _radio_play(self) -> None:
+        """Play the radio to the speakers on its own output stream, ducked while the
+        agent's TTS is talking so you can hear the reply over the broadcast."""
+        import sounddevice as sd
+        try:
+            out = sd.OutputStream(samplerate=SR, channels=1, dtype="float32")
+            out.start()
+        except Exception as e:
+            self.ui.log("error", f"radio audio out failed: {e}")
+            return
+        while not self._shutdown.is_set():
+            try:
+                frame = self._radio_q.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            if frame is None:
+                break
+            speaking = self.floor._speaking or self.floor._echo_active()
+            vol = 0.18 if speaking else self._radio_volume   # duck under the agent
+            try:
+                out.write((frame * vol).astype(np.float32))
+            except Exception:
+                break
+        try:
+            out.stop(); out.close()
+        except Exception:
+            pass
+
+    def _mic_thread(self) -> None:  # overrides the sounddevice mic with an ffmpeg radio
         if not shutil.which("ffmpeg"):
             self.ui.log("error", "ffmpeg not found — apt-get install -y ffmpeg")
             return
+        if self._hear_radio:
+            threading.Thread(target=self._radio_play, daemon=True).start()
         cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error",
                "-reconnect", "1", "-reconnect_streamed", "1",
                "-reconnect_delay_max", "5", "-user_agent", "Mozilla/5.0",
                "-i", self._url, "-f", "f32le", "-ac", "1", "-ar", str(SR), "-"]
-        self.ui.log("boot", f"radio ◂ {self._url}")
+        self.ui.log("boot", f"radio ◂ {self._url}  (you'll hear radio + agent)")
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
                                 stderr=subprocess.DEVNULL, bufsize=FRAME * 4)
         nbytes = FRAME * 4
@@ -61,19 +97,30 @@ class RadioLiveAgent(LiveAgent):
                     break
                 got += 1
                 frame = np.frombuffer(buf, dtype=np.float32).copy()
-                self.floor.push_audio(frame, SR)   # live stream -> real-time paced
+                self.floor.push_audio(frame, SR)          # -> STT + ThinkSpark
+                if self._hear_radio:
+                    try:
+                        self._radio_q.put_nowait(frame)   # -> your speakers
+                    except queue.Full:
+                        pass
         finally:
             if got == 0:
                 self.ui.log("error", "radio delivered 0 frames — bad/blocked URL "
                             "(try --url with a reachable stream)")
             proc.kill()
+            try:
+                self._radio_q.put_nowait(None)
+            except Exception:
+                pass
 
 
 async def _run(args) -> None:
     ui = UI(show_raw=args.raw)
     keys = load_keys()
     agent = RadioLiveAgent(keys, ui, device=args.device, window=args.window,
-                           denoise=not args.no_denoise, url=args.url)
+                           denoise=not args.no_denoise, url=args.url,
+                           radio_volume=args.radio_volume,
+                           hear_radio=not args.no_hear_radio)
 
     # radio is a monologue: ThinkSpark TURN_END fires a lot, so keep the STT endpoint on
     # (dual trigger) for clean turns unless --pure-thinkspark is set.
@@ -111,6 +158,10 @@ def main() -> None:
     ap.add_argument("--no-denoise", action="store_true", help="disable RNNoise")
     ap.add_argument("--pure-thinkspark", action="store_true",
                     help="commit turns ONLY on ThinkSpark TURN_END (ignore STT endpoint)")
+    ap.add_argument("--radio-volume", type=float, default=0.6,
+                    help="radio loudness on your speakers (0-1; ducks to 0.18 under TTS)")
+    ap.add_argument("--no-hear-radio", action="store_true",
+                    help="don't play the radio on speakers (agent TTS only)")
     ap.add_argument("--persona-referee", default=PERSONA_REFEREE)
     ap.add_argument("--persona-llm", default=PERSONA_LLM)
     args = ap.parse_args()
