@@ -16,9 +16,11 @@ Needs ffmpeg on PATH.
 """
 from __future__ import annotations
 
+import os
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")  # silence fork-deadlock warning
+
 import argparse
 import asyncio
-import os
 import queue
 import shutil
 import statistics as stats

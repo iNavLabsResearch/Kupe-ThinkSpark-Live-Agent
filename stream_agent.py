@@ -28,6 +28,9 @@ Ctrl+C to stop.
 """
 from __future__ import annotations
 
+import os
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")  # silence fork-deadlock warning
+
 import argparse
 import asyncio
 import statistics as stats

@@ -244,6 +244,15 @@ class FloorAgent:
         while len(self._in_buf) >= FRAME_SAMPLES:
             frame = self._in_buf[:FRAME_SAMPLES]
             self._in_buf = self._in_buf[FRAME_SAMPLES:]
+            # RNNoise ONCE at the mic, before the fan-out (README: one pass cleans audio
+            # for both ThinkSpark and STT). Runs on the mic thread — never gated by the
+            # model, so denoise + STT stay real-time even if the referee falls behind.
+            frame = self.denoiser(frame)
+            # feed STT DIRECTLY here (parallel path). Previously STT audio was produced
+            # inside _step_chunk, i.e. gated by the model's per-frame speed — on a slow
+            # device the referee loop lagged and STARVED the STT stream (30 s of speech
+            # arriving as "Look."). STT is a parallel pass, never a model-gated one.
+            self._feed_stt(frame)
             try:
                 self._audio_q.put_nowait(frame)
             except queue.Full:
@@ -255,6 +264,16 @@ class FloorAgent:
                     self._audio_q.put_nowait(frame)
                 except queue.Full:
                     pass
+
+    def _feed_stt(self, frame: np.ndarray) -> None:
+        """Enqueue one (already-denoised) 80 ms frame to the STT sender, echo-muted."""
+        pcm = _f32_to_pcm16(_resample(frame, MIC_RATE, STT_RATE))
+        if self._echo_active():
+            pcm = b"\x00\x00" * (len(pcm) // 2)
+        try:
+            self._stt_q.put_nowait(pcm)
+        except queue.Full:
+            pass
 
     def _echo_active(self) -> bool:
         """Mute STT while audio is actually coming out of the speakers, not just while
@@ -285,15 +304,8 @@ class FloorAgent:
         return True
 
     def _step_chunk(self, chunk: np.ndarray) -> list:
-        chunk = self.denoiser(chunk)
-        pcm = _f32_to_pcm16(_resample(chunk, MIC_RATE, STT_RATE))
-        if self._echo_active():
-            pcm = b"\x00\x00" * (len(pcm) // 2)
-        try:
-            self._stt_q.put_nowait(pcm)
-        except queue.Full:
-            pass
-        # Referee must see the current STT every frame (not only on Turn events).
+        # chunk is already denoised + already fed to STT in push_audio (parallel path);
+        # here we only run the referee. So a slow model can never starve STT.
         self._refresh_context()
         state = self.policy.state.value
         if self._echo_active() and state == AgentState.IDLE.value:
@@ -347,6 +359,9 @@ class FloorAgent:
         would echo the agent's own voice back into STT.
         """
         if self._echo_active() or self._closed or self._speaking:
+            return ""
+        # old kupe SDKs have no spoken head — degrade silently (LLM re-open still works)
+        if not hasattr(self.referee, "generate_spoken"):
             return ""
         loop = asyncio.get_running_loop()
         state = self.policy.state.value
