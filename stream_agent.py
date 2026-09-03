@@ -129,6 +129,10 @@ async def _run(args) -> None:
     agent = LiveAgent(keys, ui, device=args.device, window=args.window,
                       denoise=not args.no_denoise)
 
+    # ThinkSpark is the endpoint. By default we IGNORE AssemblyAI's end_of_turn so the
+    # floor controller alone decides when to reply (--stt-endpoint re-enables the fallback).
+    agent.floor._use_stt_endpoint = args.stt_endpoint
+
     try:
         agent.floor.referee._referee.system_prompt = args.persona_referee
     except Exception:
@@ -160,6 +164,9 @@ def main() -> None:
     ap.add_argument("--raw", action="store_true",
                     help="also print every 80 ms MIC▸TS frame (the full firehose)")
     ap.add_argument("--no-denoise", action="store_true", help="disable RNNoise")
+    ap.add_argument("--stt-endpoint", action="store_true",
+                    help="also commit turns on AssemblyAI end_of_turn (default: OFF — "
+                         "ThinkSpark TURN_END is the only endpoint)")
     ap.add_argument("--persona-referee", default=PERSONA_REFEREE,
                     help="floor-controller system prompt (ThinkSpark)")
     ap.add_argument("--persona-llm", default=PERSONA_LLM, help="answer system prompt (LLM)")

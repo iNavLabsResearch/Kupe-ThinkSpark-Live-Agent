@@ -101,7 +101,7 @@ class Policy:
         if getattr(self.agent, "_speaking", False):
             return None
         text = await self.agent.gen_spoken()
-        if not text or _is_placeholder(text):
+        if not text or _is_placeholder(text) or _is_junk_spoken(text):
             return None
         self._last_backchannel = now
         await self.agent.speak(text, filler=True)
@@ -266,7 +266,7 @@ class Policy:
         # ask the spoken head for a context-aware re-open; fall back to a one-shot LLM
         # sentence only if it stays silent (guide: SILENCE_BREAK -> spoken or llm_reopen).
         text = await self.agent.gen_spoken()
-        if not text or _is_placeholder(text):
+        if not text or _is_placeholder(text) or _is_junk_spoken(text):
             text = await self._llm_reopen()
         if not text or _is_placeholder(text):
             return None
@@ -287,6 +287,15 @@ _PLACEHOLDERS = frozenset({
 def _is_placeholder(text: str) -> bool:
     n = " ".join((text or "").lower().strip().strip(".!?,;:").split())
     return (not n) or n in _PLACEHOLDERS or n.startswith("please wait")
+
+
+def _is_junk_spoken(text: str) -> bool:
+    """Reject a spoken-head output that is too short / mostly punctuation to say aloud
+    (e.g. the checkpoint emitting "I'." or "-,"). Needs >=2 real letters (Latin, Devanagari
+    or Gujarati) to count as a real back-channel."""
+    import re
+    letters = re.sub(r"[^A-Za-zऀ-ॿ઀-૿]", "", text or "")
+    return len(letters) < 2
 
 
 def _sentence_cut(buf: str) -> int | None:

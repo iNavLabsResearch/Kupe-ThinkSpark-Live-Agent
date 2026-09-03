@@ -128,6 +128,9 @@ class FloorAgent:
         self._stop_playback = threading.Event()
         self._closed = False
         self._turn_busy = False
+        # True: also commit a turn on AssemblyAI end_of_turn (safety fallback).
+        # False: ThinkSpark TURN_END is the ONLY endpoint (pure floor-controller mode).
+        self._use_stt_endpoint = True
         self._tasks: list[asyncio.Task] = []
         self._dirty = True
         self._echo_until = 0.0
@@ -432,7 +435,12 @@ class FloorAgent:
                         continue
                     kind = "stt-final" if is_final else "stt"
                     self.ui.log(kind, text)
-                    if is_final and not _is_junk_stt(text):
+                    # AssemblyAI's own end_of_turn is a SEPARATE endpoint from ThinkSpark.
+                    # When _use_stt_endpoint is False, we ignore it entirely — ThinkSpark's
+                    # TURN_END is the ONLY thing that commits a turn (the floor controller
+                    # is the endpoint, per the guide). STT partials/finals are still used
+                    # as context + transcript, just never as a turn trigger.
+                    if self._use_stt_endpoint and is_final and not _is_junk_stt(text):
                         if self._turn_busy:
                             continue
                         self._turn_busy = True
