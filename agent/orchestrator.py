@@ -19,7 +19,7 @@ import numpy as np
 from agent import config
 from agent.denoise import Denoiser
 from agent.policy import Action, AgentState, Policy
-from agent.providers import AssemblyAISTT, KrutrimLLM, SonioxTTS
+from agent.providers import KrutrimLLM, SonioxTTS, make_stt
 from agent.smoothing import FlagSmoother
 
 MIC_RATE = 24_000
@@ -105,7 +105,7 @@ class FloorAgent:
     def __init__(self, referee, keys, ui=None, window: int = 3, denoise: bool = True):
         self.referee = referee
         self.ui = ui or PrintUI()
-        self.stt = AssemblyAISTT(keys.stt, sample_rate=STT_RATE)
+        self.stt = make_stt(config.STT_PROVIDER, keys, sample_rate=STT_RATE)
         self.llm = KrutrimLLM(keys.llm)
         self.tts = SonioxTTS(keys.tts)
         self.denoiser = Denoiser(sample_rate=MIC_RATE, enabled=denoise)
@@ -119,7 +119,13 @@ class FloorAgent:
         self.rows: deque[FrameRow] = deque(maxlen=TABLE_MAX)
 
         self._in_buf = np.zeros(0, dtype=np.float32)
-        self._audio_q: queue.Queue = queue.Queue(maxsize=200)
+        # SMALL model-audio queue: if the referee falls behind (e.g. MPS), drop the OLDEST
+        # frames and stay near real-time instead of building a multi-second backlog. 200
+        # frames = 16 s of lag; 8 frames caps it at ~0.6 s. STT keeps its own full queue.
+        self._audio_q: queue.Queue = queue.Queue(maxsize=8)
+        # set true by an external feeder while REAL (non-silence) audio is being pushed,
+        # so the UI can colour the frames the model is actually "hearing".
+        self._user_audio_active = False
         self._stt_q: queue.Queue = queue.Queue(maxsize=200)
         self.playback_q: queue.Queue = queue.Queue(maxsize=400)
 
@@ -142,9 +148,12 @@ class FloorAgent:
 
     # -- context -------------------------------------------------------- #
     def _refresh_context(self) -> None:
+        # Feed the model ONLY the finalized transcript, never live partials: partials
+        # churn every few hundred ms and the model should see stable, complete text (you
+        # asked for this). The next audio frames after a final carry the committed text.
         self.referee.set_context(
             agent_text=self.agent_text,
-            stt_partial=self._user_partial or self._user_final,
+            stt_partial=self._user_final,
         )
 
     def _context_str(self) -> str:
@@ -477,11 +486,11 @@ class FloorAgent:
             self._stt_status = f"connect failed: {e}"
             self.ui.log("error", f"stt connect: {e}")
             raise
+        _stt = ("Soniox " + config.SONIOX_STT_MODEL if config.STT_PROVIDER == "soniox"
+                else "AssemblyAI " + config.STT_MODEL)
         self.ui.log(
             "boot",
-            f"ready · {getattr(self.referee, 'device', '?')} · "
-            f"AssemblyAI {config.STT_MODEL}"
-            f"{' · session ' + self.stt._session_id[:8] if getattr(self.stt, '_session_id', '') else ''} · "
+            f"ready · {getattr(self.referee, 'device', '?')} · STT {_stt} · "
             f"{config.LLM_MODEL} · {config.TTS_MODEL}/{config.TTS_VOICE}",
         )
         self._tasks = [

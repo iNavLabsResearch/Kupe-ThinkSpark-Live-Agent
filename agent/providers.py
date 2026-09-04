@@ -125,7 +125,111 @@ class AssemblyAISTT:
             self._ws = None
 
 
-SonioxSTT = AssemblyAISTT
+# --------------------------------------------------------------------------- #
+# STT — Soniox realtime websocket (PCM16le). Same vendor as the model's TTS
+# training audio, so the STT hears exactly the acoustic domain we synthesize.
+# --------------------------------------------------------------------------- #
+class SonioxSTT:
+    """Streaming STT over Soniox. Feed PCM16, read partial + endpoint-final turns."""
+
+    def __init__(self, api_key: str, language_hints: list[str] | None = None,
+                 sample_rate: int = 16_000):
+        self.api_key = api_key
+        self.sample_rate = sample_rate
+        self.language_hints = language_hints or ["en", "hi", "gu"]
+        self._ws = None
+        self.partial = ""
+        self.final = ""
+        self._committed = ""          # final tokens accumulated for the current turn
+        self._session_id = ""
+
+    async def connect(self):
+        import websockets
+
+        self._ws = await websockets.connect(
+            config.SONIOX_STT_WS_URL, max_size=None, ping_interval=20,
+        )
+        await self._ws.send(json.dumps({
+            "api_key": self.api_key,
+            "model": config.SONIOX_STT_MODEL,
+            "audio_format": "pcm_s16le",
+            "sample_rate": self.sample_rate,
+            "num_channels": 1,
+            "language_hints": self.language_hints,
+            "enable_endpoint_detection": True,
+        }))
+        self._session_id = "soniox"
+        return self
+
+    async def send_audio(self, pcm16: bytes) -> None:
+        if self._ws:
+            await self._ws.send(pcm16)
+
+    async def transcripts(self) -> AsyncIterator[tuple[str, bool]]:
+        """Yields (text, is_final). is_final=True on Soniox's endpoint (<end>) token."""
+        if not self._ws:
+            return
+        async for raw in self._ws:
+            if isinstance(raw, bytes):
+                try:
+                    raw = raw.decode("utf-8")
+                except Exception:
+                    continue
+            msg = json.loads(raw)
+            if msg.get("error_code") is not None or msg.get("error"):
+                raise RuntimeError(
+                    f"soniox stt {msg.get('error_code')}: "
+                    f"{msg.get('error_message') or msg.get('error')}")
+            tokens = msg.get("tokens") or []
+            endpoint = False
+            interim = []
+            for t in tokens:
+                txt = t.get("text", "")
+                if txt in ("<end>", "<fin>", "<end_of_turn>"):
+                    endpoint = True
+                    continue
+                if t.get("is_final"):
+                    self._committed += txt
+                else:
+                    interim.append(txt)
+            partial = (self._committed + "".join(interim)).strip()
+            if partial:
+                self.partial = partial
+            if endpoint:
+                final = self._committed.strip() or partial
+                self._committed = ""
+                if final:
+                    self.final = final
+                    yield final, True
+            elif partial:
+                yield partial, False
+            if msg.get("finished"):
+                return
+
+    def reset_turn(self) -> None:
+        self.partial = ""
+        self.final = ""
+        self._committed = ""
+
+    async def close(self) -> None:
+        if self._ws:
+            try:
+                await self._ws.send("")   # empty text frame = finalize
+            except Exception:
+                pass
+            try:
+                await self._ws.close()
+            except Exception:
+                pass
+            self._ws = None
+
+
+def make_stt(provider: str, keys, sample_rate: int = 16_000):
+    """Build the configured STT client. Soniox uses the SONIOX key (keys.tts);
+    AssemblyAI uses keys.stt."""
+    if (provider or "").lower() == "soniox":
+        return SonioxSTT(keys.tts, sample_rate=sample_rate)
+    return AssemblyAISTT(keys.stt, sample_rate=sample_rate)
 
 
 # --------------------------------------------------------------------------- #

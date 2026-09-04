@@ -12,10 +12,17 @@ TS_SUBFOLDER = "phase2/runs/20260902-103400/step5500"
 LLM_MODEL = "gemma-4-31b-it"
 LLM_BASE_URL = "https://cloud.olakrutrim.com/v1"
 
-# STT — AssemblyAI streaming v3 (PCM16le). Docs:
-# https://www.assemblyai.com/docs/streaming/getting-started/transcribe-streaming-audio
+# STT provider: "soniox" (same vendor as the model's TTS training audio) or "assemblyai".
+# Override without editing: STT_PROVIDER=assemblyai python stream_faked_user.py ...
+STT_PROVIDER = os.environ.get("STT_PROVIDER", "soniox")
+
+# STT — AssemblyAI streaming v3 (PCM16le).
 STT_MODEL = "universal-3-5-pro"
 STT_WS_URL = "wss://streaming.assemblyai.com/v3/ws"
+
+# STT — Soniox realtime (PCM16le). Uses the SONIOX_API_KEY (same as TTS).
+SONIOX_STT_MODEL = "stt-rt-preview"
+SONIOX_STT_WS_URL = "wss://stt-rt.soniox.com/transcribe-websocket"
 
 # TTS — Soniox realtime, Mina voice
 TTS_MODEL = "tts-rt-v2"
